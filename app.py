@@ -33,6 +33,7 @@ DEVICE_HISTORY_RE = re.compile(r"^/devices/([^/]+)/history$")
 TRIP_RE = re.compile(r"^/trips/(\d+)$")
 TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
 TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
+TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
 
 
 def get_connection():
@@ -376,20 +377,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </select>
       </div>
       <div class="field"><label>№ борта</label><input id="tr-board"></div>
-      <div class="field"><label>Склад отгрузки *</label><input id="tr-warehouse"></div>
-      <div class="field"><label>Серийный номер ЭЗПУ</label><input id="tr-ezpu"></div>
       <div class="field"><label id="tr-tracker-label">Серийный номер трекера</label><input id="tr-tracker"></div>
+      <div class="field"><label>Серийный номер ЭЗПУ</label><input id="tr-ezpu"></div>
       <div class="field"><label>Город отправления</label><input id="tr-origin"></div>
-      <div class="field"><label>Город назначения (конечный)</label><input id="tr-dest"></div>
       <div class="full">
-        <label>Промежуточные пункты выгрузки</label>
-        <div id="waypoints-list"></div>
-        <button class="secondary" type="button" onclick="addWaypoint()" style="margin-top:6px">+ Добавить пункт</button>
+        <label>Пункты погрузки (склады) *</label>
+        <div id="pickups-list"></div>
+        <button class="secondary" type="button" onclick="addStop('pickups-list')" style="margin-top:6px">+ Добавить склад</button>
+      </div>
+      <div class="full">
+        <label>Пункты выгрузки *</label>
+        <div id="dropoffs-list"></div>
+        <button class="secondary" type="button" onclick="addStop('dropoffs-list')" style="margin-top:6px">+ Добавить пункт</button>
       </div>
       <div class="full"><label>Примечания</label><input id="tr-notes" style="width:100%"></div>
       <div class="full"><button onclick="submitTrip()">Создать рейс</button></div>
       <div class="full" id="trip-msg"></div>
     </div>
+  </div>
+
+
+  <div class="panel" id="trip-detail-panel" style="display:none">
+    <button class="close-btn" onclick="closeTripDetail()">×</button>
+    <h3 id="trip-detail-title">Рейс</h3>
+    <div id="trip-detail-body"></div>
   </div>
 
   <div class="panel">
@@ -555,12 +566,14 @@ async function loadTrips() {
   body.innerHTML = '';
   data.trips.forEach(t => {
     const tr = document.createElement('tr');
+    tr.className = 'device-row';
+    tr.onclick = () => openTripDetail(t.id);
     const route = (t.origin_city || '—') + ' → ' + (t.destination_city || '—');
     const closeBtn = t.status === 'в пути'
-      ? `<button class="secondary" onclick="closeTrip(${t.id})">Закрыть</button>`
+      ? `<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть</button>`
       : '';
     const assignBtn = t.status === 'запланирован'
-      ? `<button class="secondary" onclick="assignDevice(${t.id})">Назначить устройство</button>`
+      ? `<button class="secondary" onclick="event.stopPropagation(); assignDevice(${t.id})">Назначить устройство</button>`
       : '';
     tr.innerHTML = `
       <td>${t.id}</td>
@@ -578,11 +591,59 @@ async function loadTrips() {
   document.getElementById('trip-count-label').textContent = data.count + ' рейсов';
 }
 
+async function openTripDetail(id) {
+  const panel = document.getElementById('trip-detail-panel');
+  panel.style.display = 'block';
+  document.getElementById('trip-detail-title').textContent = 'Рейс № ' + id;
+  document.getElementById('trip-detail-body').innerHTML = 'Загрузка...';
+  panel.scrollIntoView({behavior: 'smooth'});
+  const r = await fetch('/trips/' + id);
+  const t = await r.json();
+  if (!t.stops) {
+    document.getElementById('trip-detail-body').innerHTML = 'Не удалось загрузить рейс';
+    return;
+  }
+  const rows = t.stops.map(s => {
+    const done = s.status === 'исполнено';
+    const btn = done
+      ? '<span style="color:#166534">✓ ' + fmtDate(s.completed_at) + '</span>'
+      : `<button class="secondary" onclick="completeStop(${id}, ${s.id})">Исполнено</button>`;
+    return `<div class="hist-row"><b>${s.stop_type}</b> · ${s.location} ${btn}</div>`;
+  }).join('');
+  document.getElementById('trip-detail-body').innerHTML = `
+    <div style="margin-bottom:10px">
+      Клиент: ${t.client || '—'} · Подрядчик: ${t.contractor || '—'} · № борта: ${t.board_number || '—'}<br>
+      ЭЗПУ: ${t.ezpu_serial || '—'} · Трекер: ${t.tracker_serial || '—'} ·
+      Статус: <span class="trip-status trip-status-${t.status}">${t.status}</span>
+    </div>
+    ${rows}
+  `;
+}
+function closeTripDetail() { document.getElementById('trip-detail-panel').style.display = 'none'; }
+
+async function completeStop(tripId, stopId) {
+  const location = prompt('Уточнить местонахождение (можно оставить пустым):') || '';
+  const r = await fetch(`/trips/${tripId}/stops/${stopId}/complete`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({location: location}),
+  });
+  if (r.status === 200) {
+    openTripDetail(tripId);
+    loadTrips();
+  } else {
+    const data = await r.json();
+    alert(data.error || 'Ошибка');
+  }
+}
+
 const MEGAPOLIS_NAME = 'ТОО ТК Мегаполис Казахстан';
-let waypointCounter = 0;
+let stopCounter = 0;
 
 function openTripForm() {
   document.getElementById('trip-form-panel').style.display = 'block';
+  if (!document.querySelector('#pickups-list .waypoint-row')) addStop('pickups-list');
+  if (!document.querySelector('#dropoffs-list .waypoint-row')) addStop('dropoffs-list');
   document.getElementById('trip-form-panel').scrollIntoView({behavior: 'smooth'});
 }
 function closeTripForm() { document.getElementById('trip-form-panel').style.display = 'none'; }
@@ -597,30 +658,34 @@ function onContractorChange() {
   }
 }
 
-function addWaypoint(value) {
-  waypointCounter++;
-  const id = 'wp-' + waypointCounter;
+function addStop(containerId, value) {
+  stopCounter++;
+  const id = 'stop-' + stopCounter;
+  const placeholder = containerId === 'pickups-list' ? 'Склад погрузки' : 'Пункт выгрузки';
   const div = document.createElement('div');
   div.className = 'waypoint-row';
   div.id = id;
   div.innerHTML = `
-    <input placeholder="Промежуточный пункт выгрузки" value="${value || ''}">
+    <input placeholder="${placeholder}" value="${value || ''}">
     <button class="secondary" type="button" onclick="document.getElementById('${id}').remove()">×</button>
   `;
-  document.getElementById('waypoints-list').appendChild(div);
+  document.getElementById(containerId).appendChild(div);
 }
 
-function collectWaypoints() {
-  return Array.from(document.querySelectorAll('#waypoints-list .waypoint-row input'))
+function collectStops(containerId) {
+  return Array.from(document.querySelectorAll('#' + containerId + ' .waypoint-row input'))
     .map(el => el.value.trim())
     .filter(v => v);
 }
 
 function resetTripForm() {
-  ['tr-client','tr-contractor','tr-board','tr-warehouse','tr-ezpu','tr-tracker','tr-origin','tr-dest','tr-notes'].forEach(id => {
+  ['tr-client','tr-contractor','tr-board','tr-ezpu','tr-tracker','tr-origin','tr-notes'].forEach(id => {
     document.getElementById(id).value = '';
   });
-  document.getElementById('waypoints-list').innerHTML = '';
+  document.getElementById('pickups-list').innerHTML = '';
+  document.getElementById('dropoffs-list').innerHTML = '';
+  addStop('pickups-list');
+  addStop('dropoffs-list');
   onContractorChange();
 }
 
@@ -629,13 +694,19 @@ async function submitTrip() {
   msg.textContent = '';
   msg.className = '';
 
-  const warehouse = document.getElementById('tr-warehouse').value.trim();
+  const pickups = collectStops('pickups-list');
+  const dropoffs = collectStops('dropoffs-list');
   const contractor = document.getElementById('tr-contractor').value;
   const ezpu = document.getElementById('tr-ezpu').value.trim();
   const tracker = document.getElementById('tr-tracker').value.trim();
 
-  if (!warehouse) {
-    msg.textContent = 'Склад отгрузки обязателен';
+  if (!pickups.length) {
+    msg.textContent = 'Укажите хотя бы один склад погрузки';
+    msg.className = 'err';
+    return;
+  }
+  if (!dropoffs.length) {
+    msg.textContent = 'Укажите хотя бы один пункт выгрузки';
     msg.className = 'err';
     return;
   }
@@ -649,13 +720,12 @@ async function submitTrip() {
     client: document.getElementById('tr-client').value.trim(),
     contractor: contractor,
     board_number: document.getElementById('tr-board').value.trim(),
-    warehouse: warehouse,
+    pickups: pickups,
+    dropoffs: dropoffs,
     ezpu_serial: ezpu,
     tracker_serial: tracker,
     origin_city: document.getElementById('tr-origin').value.trim(),
-    destination_city: document.getElementById('tr-dest').value.trim(),
     notes: document.getElementById('tr-notes').value.trim(),
-    waypoints: collectWaypoints(),
   };
   const r = await fetch('/trips', {
     method: 'POST',
@@ -733,6 +803,9 @@ def db_create_trip(payload):
         ezpu_id = _get_or_create_device(cur, payload["ezpu_serial"], "ezpu") if payload["ezpu_serial"] else None
         tracker_id = _get_or_create_device(cur, payload["tracker_serial"], "tracker") if payload["tracker_serial"] else None
 
+        pickups = [p.strip() for p in payload["pickups"] if (p or "").strip()]
+        dropoffs = [d.strip() for d in payload["dropoffs"] if (d or "").strip()]
+
         status = "в пути" if (ezpu_id or tracker_id) else "запланирован"
 
         cur.execute(
@@ -743,35 +816,51 @@ def db_create_trip(payload):
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (client_id, contractor_id, payload["board_number"], payload["warehouse"], ezpu_id, tracker_id,
-             payload["origin_city"], payload["destination_city"], payload["hang_datetime"], status, payload["notes"]),
+            (client_id, contractor_id, payload["board_number"], pickups[0] if pickups else None, ezpu_id, tracker_id,
+             payload["origin_city"], dropoffs[-1] if dropoffs else None, payload["hang_datetime"], status, payload["notes"]),
         )
         trip_id = cur.fetchone()[0]
 
-        for i, wp in enumerate(payload["waypoints"], start=1):
-            wp = (wp or "").strip()
-            if not wp:
-                continue
+        seq = 1
+        first_pickup_id = None
+        for loc in pickups:
             cur.execute(
-                "INSERT INTO trip_waypoints (trip_id, sequence, location) VALUES (%s, %s, %s)",
-                (trip_id, i, wp),
+                """
+                INSERT INTO trip_stops (trip_id, stop_type, sequence, location, status)
+                VALUES (%s, 'погрузка', %s, %s, 'ожидание') RETURNING id
+                """,
+                (trip_id, seq, loc),
             )
+            sid = cur.fetchone()[0]
+            if first_pickup_id is None:
+                first_pickup_id = sid
+            seq += 1
+        for loc in dropoffs:
+            cur.execute(
+                "INSERT INTO trip_stops (trip_id, stop_type, sequence, location, status) VALUES (%s, 'выгрузка', %s, %s, 'ожидание')",
+                (trip_id, seq, loc),
+            )
+            seq += 1
 
-        if ezpu_id:
+        if ezpu_id and first_pickup_id:
+            cur.execute(
+                "UPDATE trip_stops SET status = 'исполнено', completed_at = %s WHERE id = %s",
+                (payload["hang_datetime"], first_pickup_id),
+            )
             cur.execute(
                 """
                 INSERT INTO operations
                     (device_id, trip_id, operation_type, location, operation_dt, document_ref)
                 VALUES (%s, %s, 'навешивание', %s, %s, %s)
                 """,
-                (ezpu_id, trip_id, payload["warehouse"], payload["hang_datetime"], payload["board_number"]),
+                (ezpu_id, trip_id, pickups[0], payload["hang_datetime"], payload["board_number"]),
             )
             cur.execute(
                 """
                 UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now()
                 WHERE id = %s
                 """,
-                (payload["warehouse"], payload["hang_datetime"], ezpu_id),
+                (pickups[0], payload["hang_datetime"], ezpu_id),
             )
 
         conn.commit()
@@ -783,15 +872,24 @@ def db_create_trip(payload):
         conn.close()
 
 
-def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt, warehouse_override):
+def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt):
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT warehouse, status FROM trips WHERE id = %s", (trip_id,))
-        row = cur.fetchone()
-        if not row:
+        cur.execute("SELECT id FROM trips WHERE id = %s", (trip_id,))
+        if not cur.fetchone():
             return None
-        warehouse = warehouse_override or row[0]
+
+        cur.execute(
+            """
+            SELECT id, location FROM trip_stops
+            WHERE trip_id = %s AND stop_type = 'погрузка' AND status = 'ожидание'
+            ORDER BY sequence LIMIT 1
+            """,
+            (trip_id,),
+        )
+        stop_row = cur.fetchone()
+        location = stop_row[1] if stop_row else None
 
         ezpu_id = _get_or_create_device(cur, ezpu_serial, "ezpu") if ezpu_serial else None
         tracker_id = _get_or_create_device(cur, tracker_serial, "tracker") if tracker_serial else None
@@ -809,6 +907,12 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt, wareh
             (ezpu_id, tracker_id, assign_dt, trip_id),
         )
 
+        if stop_row:
+            cur.execute(
+                "UPDATE trip_stops SET status = 'исполнено', completed_at = %s WHERE id = %s",
+                (assign_dt, stop_row[0]),
+            )
+
         if ezpu_id:
             cur.execute(
                 """
@@ -816,18 +920,74 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt, wareh
                     (device_id, trip_id, operation_type, location, operation_dt)
                 VALUES (%s, %s, 'навешивание', %s, %s)
                 """,
-                (ezpu_id, trip_id, warehouse, assign_dt),
+                (ezpu_id, trip_id, location, assign_dt),
             )
             cur.execute(
                 """
                 UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now()
                 WHERE id = %s
                 """,
-                (warehouse, assign_dt, ezpu_id),
+                (location, assign_dt, ezpu_id),
             )
 
         conn.commit()
         return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_complete_stop(trip_id, stop_id, completed_dt, location_override):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT stop_type, location FROM trip_stops WHERE id = %s AND trip_id = %s",
+            (stop_id, trip_id),
+        )
+        stop = cur.fetchone()
+        if not stop:
+            return None
+        stop_type, default_location = stop
+        location = location_override or default_location
+
+        cur.execute(
+            "UPDATE trip_stops SET status = 'исполнено', completed_at = %s, location = %s WHERE id = %s",
+            (completed_dt, location, stop_id),
+        )
+
+        trip_closed = False
+        if stop_type == "выгрузка":
+            cur.execute(
+                "SELECT COUNT(*) FROM trip_stops WHERE trip_id = %s AND stop_type = 'выгрузка' AND status != 'исполнено'",
+                (trip_id,),
+            )
+            remaining = cur.fetchone()[0]
+            if remaining == 0:
+                cur.execute("SELECT ezpu_device_id FROM trips WHERE id = %s", (trip_id,))
+                ezpu_id = cur.fetchone()[0]
+                cur.execute(
+                    "UPDATE trips SET status = 'снят', removal_datetime = %s, updated_at = now() WHERE id = %s",
+                    (completed_dt, trip_id),
+                )
+                if ezpu_id:
+                    cur.execute(
+                        """
+                        INSERT INTO operations (device_id, trip_id, operation_type, location, operation_dt)
+                        VALUES (%s, %s, 'снятие', %s, %s)
+                        """,
+                        (ezpu_id, trip_id, location, completed_dt),
+                    )
+                    cur.execute(
+                        "UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now() WHERE id = %s",
+                        (location, completed_dt, ezpu_id),
+                    )
+                trip_closed = True
+
+        conn.commit()
+        return {"trip_closed": trip_closed}
     except Exception:
         conn.rollback()
         raise
@@ -858,16 +1018,19 @@ def db_get_trip(trip_id):
         if not r:
             return None
         cur.execute(
-            "SELECT location, notes FROM trip_waypoints WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, stop_type, sequence, location, status, completed_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
-        waypoints = [{"location": w[0], "notes": w[1]} for w in cur.fetchall()]
+        stops = [
+            {"id": s[0], "stop_type": s[1], "sequence": s[2], "location": s[3], "status": s[4], "completed_at": s[5]}
+            for s in cur.fetchall()
+        ]
         return {
             "id": r[0], "client": r[1], "contractor": r[2], "board_number": r[3], "warehouse": r[4],
             "ezpu_serial": r[5], "tracker_serial": r[6],
             "origin_city": r[7], "destination_city": r[8], "hang_datetime": r[9],
             "arrival_at_unload_datetime": r[10], "removal_datetime": r[11],
-            "status": r[12], "notes": r[13], "waypoints": waypoints,
+            "status": r[12], "notes": r[13], "stops": stops,
         }
     finally:
         conn.close()
@@ -1084,6 +1247,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_assign_device(int(m.group(1)))
             return
 
+        m = TRIP_STOP_COMPLETE_RE.match(path)
+        if m:
+            self._handle_complete_stop(int(m.group(1)), int(m.group(2)))
+            return
+
         self._send_json({"error": "не найдено"}, status=404)
 
     def _read_json_body(self):
@@ -1159,11 +1327,22 @@ class Handler(BaseHTTPRequestHandler):
 
         ezpu_serial = (body.get("ezpu_serial") or "").strip() or None
         tracker_serial = (body.get("tracker_serial") or "").strip() or None
-        warehouse = (body.get("warehouse") or "").strip() or None
         contractor = (body.get("contractor") or "").strip() or None
 
-        if not warehouse:
-            self._send_json({"error": "Склад отгрузки обязателен (поле warehouse)"}, status=400)
+        pickups = body.get("pickups")
+        dropoffs = body.get("dropoffs")
+        if pickups is None and body.get("warehouse"):
+            pickups = [body.get("warehouse")]
+        if dropoffs is None:
+            dropoffs = list(body.get("waypoints") or [])
+            if body.get("destination_city"):
+                dropoffs.append(body.get("destination_city"))
+
+        if not isinstance(pickups, list) or not any((p or "").strip() for p in pickups):
+            self._send_json({"error": "Укажите хотя бы один пункт погрузки (склад отгрузки)"}, status=400)
+            return
+        if not isinstance(dropoffs, list) or not any((d or "").strip() for d in dropoffs):
+            self._send_json({"error": "Укажите хотя бы один пункт выгрузки"}, status=400)
             return
 
         if contractor == self.MEGAPOLIS_NAME and (ezpu_serial or tracker_serial) and not tracker_serial:
@@ -1179,23 +1358,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "hang_datetime должен быть в формате ISO 8601"}, status=400)
             return
 
-        waypoints = body.get("waypoints") or []
-        if not isinstance(waypoints, list):
-            self._send_json({"error": "waypoints должен быть списком строк"}, status=400)
-            return
-
         payload = {
             "client": (body.get("client") or "").strip() or None,
             "contractor": contractor,
             "board_number": body.get("board_number"),
-            "warehouse": warehouse,
+            "pickups": pickups,
+            "dropoffs": dropoffs,
             "ezpu_serial": ezpu_serial,
             "tracker_serial": tracker_serial,
             "origin_city": body.get("origin_city"),
-            "destination_city": body.get("destination_city"),
             "hang_datetime": hang_dt,
             "notes": body.get("notes"),
-            "waypoints": waypoints,
         }
 
         try:
@@ -1261,10 +1434,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "assign_datetime должен быть в формате ISO 8601"}, status=400)
             return
 
-        warehouse_override = (body.get("warehouse") or "").strip() or None
-
         try:
-            result = db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt, warehouse_override)
+            result = db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt)
         except Exception as e:
             self._send_json({"error": str(e)}, status=500)
             return
@@ -1274,6 +1445,33 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"id": trip_id, "status": "device_assigned"})
+
+    def _handle_complete_stop(self, trip_id, stop_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        try:
+            completed_dt = self._parse_dt(body.get("completed_at"))
+        except ValueError:
+            self._send_json({"error": "completed_at должен быть в формате ISO 8601"}, status=400)
+            return
+
+        location_override = (body.get("location") or "").strip() or None
+
+        try:
+            result = db_complete_stop(trip_id, stop_id, completed_dt, location_override)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if result is None:
+            self._send_json({"error": "Остановка не найдена"}, status=404)
+            return
+
+        self._send_json({"stop_id": stop_id, "status": "completed", "trip_closed": result["trip_closed"]})
 
 
 if __name__ == "__main__":
