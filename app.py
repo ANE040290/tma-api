@@ -255,6 +255,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .tab-view.active { display: block; }
   .trip-status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #dbeafe; color: #1e40af; }
   .trip-status-снят { background: #dcfce7; color: #166534; }
+  .waypoint-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
+  .waypoint-row input { flex: 1; }
+  .waypoint-row button { padding: 6px 10px; }
 </style>
 </head>
 <body>
@@ -361,12 +364,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h3>Новый рейс</h3>
     <div class="op-form">
       <div class="field"><label>Клиент</label><input id="tr-client"></div>
+      <div class="field">
+        <label>Подрядчик</label>
+        <select id="tr-contractor" onchange="onContractorChange()">
+          <option value="">не указан</option>
+          <option value="ТОО ТК Мегаполис Казахстан">ТОО ТК Мегаполис Казахстан</option>
+          <option value="ТОО ТМЕ">ТОО ТМЕ</option>
+          <option value="ТОО СОП ТЖК">ТОО СОП ТЖК</option>
+        </select>
+      </div>
       <div class="field"><label>№ борта</label><input id="tr-board"></div>
+      <div class="field"><label>Склад отгрузки *</label><input id="tr-warehouse"></div>
       <div class="field"><label>Серийный номер ЭЗПУ</label><input id="tr-ezpu"></div>
-      <div class="field"><label>Серийный номер трекера</label><input id="tr-tracker"></div>
+      <div class="field"><label id="tr-tracker-label">Серийный номер трекера</label><input id="tr-tracker"></div>
       <div class="field"><label>Город отправления</label><input id="tr-origin"></div>
-      <div class="field"><label>Город назначения</label><input id="tr-dest"></div>
-      <div class="field"><label>Склад</label><input id="tr-warehouse"></div>
+      <div class="field"><label>Город назначения (конечный)</label><input id="tr-dest"></div>
+      <div class="full">
+        <label>Промежуточные пункты выгрузки</label>
+        <div id="waypoints-list"></div>
+        <button class="secondary" type="button" onclick="addWaypoint()" style="margin-top:6px">+ Добавить пункт</button>
+      </div>
       <div class="full"><label>Примечания</label><input id="tr-notes" style="width:100%"></div>
       <div class="full"><button onclick="submitTrip()">Создать рейс</button></div>
       <div class="full" id="trip-msg"></div>
@@ -377,7 +394,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="count" id="trip-count-label">Загрузка...</div>
     <table>
       <thead><tr>
-        <th>№</th><th>Клиент</th><th>ЭЗПУ</th><th>Трекер</th><th>Маршрут</th><th>Навешена</th><th>Статус</th><th></th>
+        <th>№</th><th>Клиент</th><th>Подрядчик</th><th>ЭЗПУ</th><th>Трекер</th><th>Маршрут</th><th>Навешена</th><th>Статус</th><th></th>
       </tr></thead>
       <tbody id="trips-body"></tbody>
     </table>
@@ -543,6 +560,7 @@ async function loadTrips() {
     tr.innerHTML = `
       <td>${t.id}</td>
       <td>${t.client || '—'}</td>
+      <td>${t.contractor || '—'}</td>
       <td>${t.ezpu_serial || '—'}</td>
       <td>${t.tracker_serial || '—'}</td>
       <td>${route}</td>
@@ -555,31 +573,90 @@ async function loadTrips() {
   document.getElementById('trip-count-label').textContent = data.count + ' рейсов';
 }
 
+const MEGAPOLIS_NAME = 'ТОО ТК Мегаполис Казахстан';
+let waypointCounter = 0;
+
 function openTripForm() {
   document.getElementById('trip-form-panel').style.display = 'block';
   document.getElementById('trip-form-panel').scrollIntoView({behavior: 'smooth'});
 }
 function closeTripForm() { document.getElementById('trip-form-panel').style.display = 'none'; }
 
+function onContractorChange() {
+  const contractor = document.getElementById('tr-contractor').value;
+  const label = document.getElementById('tr-tracker-label');
+  if (contractor === MEGAPOLIS_NAME) {
+    label.textContent = 'Серийный номер трекера * (обязателен для Мегаполис)';
+  } else {
+    label.textContent = 'Серийный номер трекера';
+  }
+}
+
+function addWaypoint(value) {
+  waypointCounter++;
+  const id = 'wp-' + waypointCounter;
+  const div = document.createElement('div');
+  div.className = 'waypoint-row';
+  div.id = id;
+  div.innerHTML = `
+    <input placeholder="Промежуточный пункт выгрузки" value="${value || ''}">
+    <button class="secondary" type="button" onclick="document.getElementById('${id}').remove()">×</button>
+  `;
+  document.getElementById('waypoints-list').appendChild(div);
+}
+
+function collectWaypoints() {
+  return Array.from(document.querySelectorAll('#waypoints-list .waypoint-row input'))
+    .map(el => el.value.trim())
+    .filter(v => v);
+}
+
+function resetTripForm() {
+  ['tr-client','tr-contractor','tr-board','tr-warehouse','tr-ezpu','tr-tracker','tr-origin','tr-dest','tr-notes'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('waypoints-list').innerHTML = '';
+  onContractorChange();
+}
+
 async function submitTrip() {
   const msg = document.getElementById('trip-msg');
   msg.textContent = '';
   msg.className = '';
-  const payload = {
-    client: document.getElementById('tr-client').value.trim(),
-    board_number: document.getElementById('tr-board').value.trim(),
-    ezpu_serial: document.getElementById('tr-ezpu').value.trim(),
-    tracker_serial: document.getElementById('tr-tracker').value.trim(),
-    origin_city: document.getElementById('tr-origin').value.trim(),
-    destination_city: document.getElementById('tr-dest').value.trim(),
-    warehouse: document.getElementById('tr-warehouse').value.trim(),
-    notes: document.getElementById('tr-notes').value.trim(),
-  };
-  if (!payload.ezpu_serial && !payload.tracker_serial) {
+
+  const warehouse = document.getElementById('tr-warehouse').value.trim();
+  const contractor = document.getElementById('tr-contractor').value;
+  const ezpu = document.getElementById('tr-ezpu').value.trim();
+  const tracker = document.getElementById('tr-tracker').value.trim();
+
+  if (!ezpu && !tracker) {
     msg.textContent = 'Укажите серийный номер ЭЗПУ или трекера';
     msg.className = 'err';
     return;
   }
+  if (!warehouse) {
+    msg.textContent = 'Склад отгрузки обязателен';
+    msg.className = 'err';
+    return;
+  }
+  if (contractor === MEGAPOLIS_NAME && !tracker) {
+    msg.textContent = 'Для подрядчика «' + MEGAPOLIS_NAME + '» обязателен номер трекера';
+    msg.className = 'err';
+    return;
+  }
+
+  const payload = {
+    client: document.getElementById('tr-client').value.trim(),
+    contractor: contractor,
+    board_number: document.getElementById('tr-board').value.trim(),
+    warehouse: warehouse,
+    ezpu_serial: ezpu,
+    tracker_serial: tracker,
+    origin_city: document.getElementById('tr-origin').value.trim(),
+    destination_city: document.getElementById('tr-dest').value.trim(),
+    notes: document.getElementById('tr-notes').value.trim(),
+    waypoints: collectWaypoints(),
+  };
   const r = await fetch('/trips', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -589,9 +666,7 @@ async function submitTrip() {
   if (r.status === 201) {
     msg.textContent = 'Рейс создан, id ' + data.id;
     msg.className = 'ok';
-    ['tr-client','tr-board','tr-ezpu','tr-tracker','tr-origin','tr-dest','tr-warehouse','tr-notes'].forEach(id => {
-      document.getElementById(id).value = '';
-    });
+    resetTripForm();
     loadTrips();
   } else {
     msg.textContent = data.error || 'Ошибка сохранения';
@@ -637,21 +712,31 @@ def db_create_trip(payload):
     try:
         cur = conn.cursor()
         client_id = _get_or_create_client(cur, payload["client"])
+        contractor_id = _get_or_create_party(cur, payload["contractor"]) if payload["contractor"] else None
         ezpu_id = _get_or_create_device(cur, payload["ezpu_serial"], "ezpu") if payload["ezpu_serial"] else None
         tracker_id = _get_or_create_device(cur, payload["tracker_serial"], "tracker") if payload["tracker_serial"] else None
 
         cur.execute(
             """
             INSERT INTO trips
-                (client_id, board_number, warehouse, ezpu_device_id, tracker_device_id,
+                (client_id, contractor_id, board_number, warehouse, ezpu_device_id, tracker_device_id,
                  origin_city, destination_city, hang_datetime, status, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'в пути', %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'в пути', %s)
             RETURNING id
             """,
-            (client_id, payload["board_number"], payload["warehouse"], ezpu_id, tracker_id,
+            (client_id, contractor_id, payload["board_number"], payload["warehouse"], ezpu_id, tracker_id,
              payload["origin_city"], payload["destination_city"], payload["hang_datetime"], payload["notes"]),
         )
         trip_id = cur.fetchone()[0]
+
+        for i, wp in enumerate(payload["waypoints"], start=1):
+            wp = (wp or "").strip()
+            if not wp:
+                continue
+            cur.execute(
+                "INSERT INTO trip_waypoints (trip_id, sequence, location) VALUES (%s, %s, %s)",
+                (trip_id, i, wp),
+            )
 
         if ezpu_id:
             cur.execute(
@@ -660,14 +745,14 @@ def db_create_trip(payload):
                     (device_id, trip_id, operation_type, location, operation_dt, document_ref)
                 VALUES (%s, %s, 'навешивание', %s, %s, %s)
                 """,
-                (ezpu_id, trip_id, payload["origin_city"], payload["hang_datetime"], payload["board_number"]),
+                (ezpu_id, trip_id, payload["warehouse"], payload["hang_datetime"], payload["board_number"]),
             )
             cur.execute(
                 """
                 UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now()
                 WHERE id = %s
                 """,
-                (payload["origin_city"], payload["hang_datetime"], ezpu_id),
+                (payload["warehouse"], payload["hang_datetime"], ezpu_id),
             )
 
         conn.commit()
@@ -685,12 +770,13 @@ def db_get_trip(trip_id):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT t.id, c.name, t.board_number, t.warehouse,
+            SELECT t.id, c.name, ct.name, t.board_number, t.warehouse,
                    de.serial_number, dt.serial_number,
                    t.origin_city, t.destination_city, t.hang_datetime,
                    t.arrival_at_unload_datetime, t.removal_datetime, t.status, t.notes
             FROM trips t
             LEFT JOIN clients c ON c.id = t.client_id
+            LEFT JOIN parties ct ON ct.id = t.contractor_id
             LEFT JOIN devices de ON de.id = t.ezpu_device_id
             LEFT JOIN devices dt ON dt.id = t.tracker_device_id
             WHERE t.id = %s
@@ -700,12 +786,17 @@ def db_get_trip(trip_id):
         r = cur.fetchone()
         if not r:
             return None
+        cur.execute(
+            "SELECT location, notes FROM trip_waypoints WHERE trip_id = %s ORDER BY sequence",
+            (trip_id,),
+        )
+        waypoints = [{"location": w[0], "notes": w[1]} for w in cur.fetchall()]
         return {
-            "id": r[0], "client": r[1], "board_number": r[2], "warehouse": r[3],
-            "ezpu_serial": r[4], "tracker_serial": r[5],
-            "origin_city": r[6], "destination_city": r[7], "hang_datetime": r[8],
-            "arrival_at_unload_datetime": r[9], "removal_datetime": r[10],
-            "status": r[11], "notes": r[12],
+            "id": r[0], "client": r[1], "contractor": r[2], "board_number": r[3], "warehouse": r[4],
+            "ezpu_serial": r[5], "tracker_serial": r[6],
+            "origin_city": r[7], "destination_city": r[8], "hang_datetime": r[9],
+            "arrival_at_unload_datetime": r[10], "removal_datetime": r[11],
+            "status": r[12], "notes": r[13], "waypoints": waypoints,
         }
     finally:
         conn.close()
@@ -716,10 +807,11 @@ def db_list_trips(status=None, client=None, limit=200):
     try:
         cur = conn.cursor()
         query = """
-            SELECT t.id, c.name, t.board_number, de.serial_number, dt.serial_number,
+            SELECT t.id, c.name, ct.name, t.board_number, de.serial_number, dt.serial_number,
                    t.origin_city, t.destination_city, t.hang_datetime, t.status
             FROM trips t
             LEFT JOIN clients c ON c.id = t.client_id
+            LEFT JOIN parties ct ON ct.id = t.contractor_id
             LEFT JOIN devices de ON de.id = t.ezpu_device_id
             LEFT JOIN devices dt ON dt.id = t.tracker_device_id
             WHERE 1=1
@@ -736,10 +828,10 @@ def db_list_trips(status=None, client=None, limit=200):
         cur.execute(query, params)
         return [
             {
-                "id": r[0], "client": r[1], "board_number": r[2],
-                "ezpu_serial": r[3], "tracker_serial": r[4],
-                "origin_city": r[5], "destination_city": r[6],
-                "hang_datetime": r[7], "status": r[8],
+                "id": r[0], "client": r[1], "contractor": r[2], "board_number": r[3],
+                "ezpu_serial": r[4], "tracker_serial": r[5],
+                "origin_city": r[6], "destination_city": r[7],
+                "hang_datetime": r[8], "status": r[9],
             }
             for r in cur.fetchall()
         ]
@@ -980,6 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
             return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
         return None
 
+    MEGAPOLIS_NAME = "ТОО ТК Мегаполис Казахстан"
+
     def _handle_create_trip(self):
         try:
             body = self._read_json_body()
@@ -989,9 +1083,22 @@ class Handler(BaseHTTPRequestHandler):
 
         ezpu_serial = (body.get("ezpu_serial") or "").strip() or None
         tracker_serial = (body.get("tracker_serial") or "").strip() or None
+        warehouse = (body.get("warehouse") or "").strip() or None
+        contractor = (body.get("contractor") or "").strip() or None
 
         if not ezpu_serial and not tracker_serial:
             self._send_json({"error": "Укажите хотя бы ezpu_serial или tracker_serial"}, status=400)
+            return
+
+        if not warehouse:
+            self._send_json({"error": "Склад отгрузки обязателен (поле warehouse)"}, status=400)
+            return
+
+        if contractor == self.MEGAPOLIS_NAME and not tracker_serial:
+            self._send_json(
+                {"error": f"Для подрядчика «{self.MEGAPOLIS_NAME}» обязателен номер трекера (tracker_serial)"},
+                status=400,
+            )
             return
 
         try:
@@ -1000,16 +1107,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "hang_datetime должен быть в формате ISO 8601"}, status=400)
             return
 
+        waypoints = body.get("waypoints") or []
+        if not isinstance(waypoints, list):
+            self._send_json({"error": "waypoints должен быть списком строк"}, status=400)
+            return
+
         payload = {
             "client": (body.get("client") or "").strip() or None,
+            "contractor": contractor,
             "board_number": body.get("board_number"),
-            "warehouse": body.get("warehouse"),
+            "warehouse": warehouse,
             "ezpu_serial": ezpu_serial,
             "tracker_serial": tracker_serial,
             "origin_city": body.get("origin_city"),
             "destination_city": body.get("destination_city"),
             "hang_datetime": hang_dt,
             "notes": body.get("notes"),
+            "waypoints": waypoints,
         }
 
         try:
