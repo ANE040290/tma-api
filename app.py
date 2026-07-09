@@ -34,6 +34,7 @@ TRIP_RE = re.compile(r"^/trips/(\d+)$")
 TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
 TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
+TRIP_STOP_ZPU_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/zpu$")
 
 
 def get_connection():
@@ -211,7 +212,7 @@ def db_create_operation(payload):
         conn.close()
 
 
-DASHBOARD_HTML = """<!DOCTYPE html>
+DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -255,9 +256,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .tab-btn.active { background: #fff; color: #1f2937; font-weight: 600; }
   .tab-view { display: none; }
   .tab-view.active { display: block; }
-  .trip-status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #dbeafe; color: #1e40af; }
-  .trip-status-снят { background: #dcfce7; color: #166534; }
+  .trip-status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #e5e7eb; color: #444; }
+  .trip-status-ожидание { background: #fef3c7; color: #92400e; }
   .trip-status-запланирован { background: #fef3c7; color: #92400e; }
+  .trip-status-исполнено { background: #dcfce7; color: #166534; }
+  .trip-status-снят { background: #dcfce7; color: #166534; }
+  .trip-status-в-пути { background: #dbeafe; color: #1e40af; }
   .waypoint-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
   .waypoint-row input { flex: 1; }
   .waypoint-row button { padding: 6px 10px; }
@@ -562,6 +566,12 @@ function switchTab(name) {
 
 let editingTrips = new Set();
 
+let editingZpuStops = new Set();
+
+function statusClass(status) {
+  return 'trip-status-' + String(status).toLowerCase().replace(/\s+/g, '-');
+}
+
 async function loadTrips() {
   const status = document.getElementById('tf-status').value;
   const client = document.getElementById('tf-client').value.trim();
@@ -579,13 +589,13 @@ async function loadTrips() {
     const combined = [...(t.pickups || []), ...(t.dropoffs || [])].sort((a, b) => a.sequence - b.sequence);
     let legs = [];
     for (let i = 0; i < combined.length - 1; i++) {
-      legs.push({from: combined[i].location, to: combined[i + 1].location, toStop: combined[i + 1]});
+      legs.push({from: combined[i].location, to: combined[i + 1].location, fromStop: combined[i], toStop: combined[i + 1]});
     }
     if (legs.length === 0 && combined.length === 1) {
-      legs.push({from: combined[0].location, to: '—', toStop: combined[0]});
+      legs.push({from: combined[0].location, to: '—', fromStop: combined[0], toStop: combined[0]});
     }
     if (legs.length === 0) {
-      legs.push({from: '—', to: '—', toStop: null});
+      legs.push({from: '—', to: '—', fromStop: null, toStop: null});
     }
 
     legs.forEach((leg, i) => {
@@ -595,10 +605,12 @@ async function loadTrips() {
       const num = i === 0 ? String(t.id) : `${t.id}.${i}`;
       const legDone = leg.toStop && leg.toStop.status === 'исполнено';
       const legStatus = leg.toStop ? leg.toStop.status : '—';
-      const editing = i === 0 && editingTrips.has(t.id);
+      const editingDevice = i === 0 && editingTrips.has(t.id);
+      const zpuStopId = leg.fromStop ? leg.fromStop.id : null;
+      const editingZpu = zpuStopId && editingZpuStops.has(zpuStopId);
 
       const actionBtns = [];
-      if (editing) {
+      if (editingDevice) {
         actionBtns.push(`<button onclick="event.stopPropagation(); saveDevice(${t.id})">Сохранить</button>`);
         actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditDevice(${t.id})">Отмена</button>`);
       } else {
@@ -613,15 +625,23 @@ async function loadTrips() {
           actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
         }
       }
+      if (zpuStopId && !editingZpu) {
+        const zpuLabel = leg.fromStop.zpu_number ? 'Изменить № ЗПУ' : 'Назначить № ЗПУ';
+        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); startEditZpu(${zpuStopId})">${zpuLabel}</button>`);
+      }
+      if (editingZpu) {
+        actionBtns.push(`<button onclick="event.stopPropagation(); saveZpu(${t.id}, ${zpuStopId})">Сохранить ЗПУ</button>`);
+        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditZpu(${zpuStopId})">Отмена</button>`);
+      }
 
-      const deviceCells = editing ? `
+      const deviceCells = editingDevice ? `
         <td><input id="edit-ezpu-${t.id}" value="${t.ezpu_serial || ''}" style="width:100px" onclick="event.stopPropagation()"></td>
-        <td><input id="edit-zpu-${t.id}" value="${t.zpu_number || ''}" style="width:90px" onclick="event.stopPropagation()"></td>
+        <td>${zpuCell(leg, editingZpu, zpuStopId)}</td>
         <td><input id="edit-tracker-${t.id}" value="${t.tracker_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
         <td><input id="edit-lock-${t.id}" value="${t.lock_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
       ` : `
         <td>${t.ezpu_serial || '—'}</td>
-        <td>${t.zpu_number || '—'}</td>
+        <td>${zpuCell(leg, editingZpu, zpuStopId)}</td>
         <td>${t.tracker_serial || '—'}</td>
         <td>${t.lock_serial || '—'}</td>
       `;
@@ -633,13 +653,47 @@ async function loadTrips() {
         <td>${leg.from}</td>
         <td>${leg.to}</td>
         <td>${i === 0 ? fmtDate(t.hang_datetime) : ''}</td>
-        <td>${leg.toStop ? '<span class="trip-status trip-status-' + legStatus + '">' + legStatus + '</span>' : '<span class="trip-status trip-status-' + t.status + '">' + t.status + '</span>'}</td>
+        <td>${leg.toStop
+          ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>'
+          : '<span class="trip-status ' + statusClass(t.status) + '">' + t.status + '</span>'}</td>
         <td>${actionBtns.join(' ')}</td>
       `;
       body.appendChild(tr);
     });
   });
   document.getElementById('trip-count-label').textContent = trips.length + ' рейсов' + (hideCompleted ? ' (без завершённых)' : '');
+}
+
+function zpuCell(leg, editingZpu, zpuStopId) {
+  if (!zpuStopId) return '—';
+  if (editingZpu) {
+    return `<input id="edit-zpu-stop-${zpuStopId}" value="${leg.fromStop.zpu_number || ''}" style="width:90px" onclick="event.stopPropagation()">`;
+  }
+  return leg.fromStop.zpu_number || '—';
+}
+
+function startEditZpu(stopId) {
+  editingZpuStops.add(stopId);
+  loadTrips();
+}
+function cancelEditZpu(stopId) {
+  editingZpuStops.delete(stopId);
+  loadTrips();
+}
+async function saveZpu(tripId, stopId) {
+  const value = document.getElementById('edit-zpu-stop-' + stopId).value.trim();
+  const r = await fetch(`/trips/${tripId}/stops/${stopId}/zpu`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({zpu_number: value}),
+  });
+  if (r.status === 200) {
+    editingZpuStops.delete(stopId);
+    loadTrips();
+  } else {
+    const data = await r.json();
+    alert(data.error || 'Ошибка сохранения ЗПУ');
+  }
 }
 
 async function openTripDetail(id) {
@@ -665,7 +719,7 @@ async function openTripDetail(id) {
     <div style="margin-bottom:10px">
       Клиент: ${t.client || '—'} · Подрядчик: ${t.contractor || '—'} · № борта: ${t.board_number || '—'}<br>
       ЭЗПУ: ${t.ezpu_serial || '—'} · № ЗПУ: ${t.zpu_number || '—'} · Трекер: ${t.tracker_serial || '—'} · Закладка: ${t.lock_serial || '—'} ·
-      Статус: <span class="trip-status trip-status-${t.status}">${t.status}</span>
+      Статус: <span class="trip-status ${statusClass(t.status)}">${t.status}</span>
     </div>
     ${rows}
   `;
@@ -673,14 +727,16 @@ async function openTripDetail(id) {
 function closeTripDetail() { document.getElementById('trip-detail-panel').style.display = 'none'; }
 
 async function completeStop(tripId, stopId) {
-  const location = prompt('Уточнить местонахождение (можно оставить пустым):') || '';
   const r = await fetch(`/trips/${tripId}/stops/${stopId}/complete`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({location: location}),
+    body: JSON.stringify({}),
   });
   if (r.status === 200) {
-    openTripDetail(tripId);
+    const panel = document.getElementById('trip-detail-panel');
+    if (panel.style.display === 'block' && document.getElementById('trip-detail-title').textContent === 'Рейс № ' + tripId) {
+      openTripDetail(tripId);
+    }
     loadTrips();
   } else {
     const data = await r.json();
@@ -1076,6 +1132,24 @@ def db_complete_stop(trip_id, stop_id, completed_dt, location_override):
         conn.close()
 
 
+def db_set_stop_zpu(trip_id, stop_id, zpu_number):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE trip_stops SET zpu_number = %s WHERE id = %s AND trip_id = %s RETURNING id",
+            (zpu_number, stop_id, trip_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def db_get_trip(trip_id):
     conn = get_connection()
     try:
@@ -1100,11 +1174,12 @@ def db_get_trip(trip_id):
         if not r:
             return None
         cur.execute(
-            "SELECT id, stop_type, sequence, location, status, completed_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
         stops = [
-            {"id": s[0], "stop_type": s[1], "sequence": s[2], "location": s[3], "status": s[4], "completed_at": s[5]}
+            {"id": s[0], "stop_type": s[1], "sequence": s[2], "location": s[3], "status": s[4],
+             "completed_at": s[5], "zpu_number": s[6]}
             for s in cur.fetchall()
         ]
         return {
@@ -1150,15 +1225,18 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT id, trip_id, stop_type, sequence, location, status FROM trip_stops
+                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for stop_id, trip_id, stop_type, sequence, location, st_status in cur.fetchall():
+            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
-                stops_by_trip[trip_id][key].append({"id": stop_id, "location": location, "status": st_status, "sequence": sequence})
+                stops_by_trip[trip_id][key].append({
+                    "id": stop_id, "location": location, "status": st_status,
+                    "sequence": sequence, "zpu_number": zpu,
+                })
 
         return [
             {
@@ -1352,6 +1430,11 @@ class Handler(BaseHTTPRequestHandler):
         m = TRIP_STOP_COMPLETE_RE.match(path)
         if m:
             self._handle_complete_stop(int(m.group(1)), int(m.group(2)))
+            return
+
+        m = TRIP_STOP_ZPU_RE.match(path)
+        if m:
+            self._handle_set_stop_zpu(int(m.group(1)), int(m.group(2)))
             return
 
         self._send_json({"error": "не найдено"}, status=404)
@@ -1579,6 +1662,27 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"stop_id": stop_id, "status": "completed", "trip_closed": result["trip_closed"]})
+
+    def _handle_set_stop_zpu(self, trip_id, stop_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        zpu_number = (body.get("zpu_number") or "").strip() or None
+
+        try:
+            ok = db_set_stop_zpu(trip_id, stop_id, zpu_number)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if not ok:
+            self._send_json({"error": "Остановка не найдена"}, status=404)
+            return
+
+        self._send_json({"stop_id": stop_id, "zpu_number": zpu_number, "status": "updated"})
 
 
 if __name__ == "__main__":
