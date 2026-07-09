@@ -413,7 +413,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="count" id="trip-count-label">Загрузка...</div>
     <table>
       <thead><tr>
-        <th>№</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Статус</th><th></th>
+        <th>№</th><th>Номер борта</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Статус</th><th></th>
       </tr></thead>
       <tbody id="trips-body"></tbody>
     </table>
@@ -571,34 +571,52 @@ async function loadTrips() {
   const body = document.getElementById('trips-body');
   body.innerHTML = '';
   data.trips.forEach(t => {
-    const tr = document.createElement('tr');
-    tr.className = 'device-row';
-    tr.onclick = () => openTripDetail(t.id);
-    const closeBtn = t.status === 'в пути'
-      ? `<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть</button>`
-      : '';
-    const assignBtn = t.status === 'запланирован'
-      ? `<button class="secondary" onclick="event.stopPropagation(); assignDevice(${t.id})">Назначить устройство</button>`
-      : '';
-    const pickupsHtml = (t.pickups && t.pickups.length ? t.pickups : [{location: '—', status: 'ожидание', sequence: null}])
-      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.sequence ? t.id + '.' + s.sequence + ' ' : ''}${s.location}</div>`)
-      .join('');
-    const dropoffsHtml = (t.dropoffs && t.dropoffs.length ? t.dropoffs : [{location: '—', status: 'ожидание', sequence: null}])
-      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.sequence ? t.id + '.' + s.sequence + ' ' : ''}${s.location}</div>`)
-      .join('');
-    tr.innerHTML = `
-      <td>${t.id}${t.board_number ? '<br><span style="color:var(--text-secondary,#888)">' + t.board_number + '</span>' : ''}</td>
-      <td>${t.ezpu_serial || '—'}</td>
-      <td>${t.zpu_number || '—'}</td>
-      <td>${t.tracker_serial || '—'}</td>
-      <td>${t.lock_serial || '—'}</td>
-      <td>${pickupsHtml}</td>
-      <td>${dropoffsHtml}</td>
-      <td>${fmtDate(t.hang_datetime)}</td>
-      <td><span class="trip-status trip-status-${t.status}">${t.status}</span></td>
-      <td>${closeBtn} ${assignBtn}</td>
-    `;
-    body.appendChild(tr);
+    const combined = [...(t.pickups || []), ...(t.dropoffs || [])].sort((a, b) => a.sequence - b.sequence);
+    let legs = [];
+    for (let i = 0; i < combined.length - 1; i++) {
+      legs.push({from: combined[i].location, to: combined[i + 1].location, toStop: combined[i + 1]});
+    }
+    if (legs.length === 0 && combined.length === 1) {
+      legs.push({from: combined[0].location, to: '—', toStop: combined[0]});
+    }
+    if (legs.length === 0) {
+      legs.push({from: '—', to: '—', toStop: null});
+    }
+
+    legs.forEach((leg, i) => {
+      const tr = document.createElement('tr');
+      tr.className = 'device-row';
+      tr.onclick = () => openTripDetail(t.id);
+      const num = i === 0 ? String(t.id) : `${t.id}.${i}`;
+      const legDone = leg.toStop && leg.toStop.status === 'исполнено';
+      const legStatus = leg.toStop ? leg.toStop.status : '—';
+
+      const actionBtns = [];
+      if (i === 0 && t.status === 'запланирован') {
+        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); assignDevice(${t.id})">Назначить устройство</button>`);
+      }
+      if (i === 0 && t.status === 'в пути') {
+        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть</button>`);
+      }
+      if (leg.toStop && !legDone) {
+        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
+      }
+
+      tr.innerHTML = `
+        <td>${num}</td>
+        <td style="color:#999">${t.board_number || '—'}</td>
+        <td>${t.ezpu_serial || '—'}</td>
+        <td>${t.zpu_number || '—'}</td>
+        <td>${t.tracker_serial || '—'}</td>
+        <td>${t.lock_serial || '—'}</td>
+        <td>${leg.from}</td>
+        <td>${leg.to}</td>
+        <td>${i === 0 ? fmtDate(t.hang_datetime) : ''}</td>
+        <td>${leg.toStop ? '<span class="trip-status trip-status-' + legStatus + '">' + legStatus + '</span>' : '<span class="trip-status trip-status-' + t.status + '">' + t.status + '</span>'}</td>
+        <td>${actionBtns.join(' ')}</td>
+      `;
+      body.appendChild(tr);
+    });
   });
   document.getElementById('trip-count-label').textContent = data.count + ' рейсов';
 }
@@ -1091,15 +1109,15 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT trip_id, stop_type, sequence, location, status FROM trip_stops
+                SELECT id, trip_id, stop_type, sequence, location, status FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for trip_id, stop_type, sequence, location, st_status in cur.fetchall():
+            for stop_id, trip_id, stop_type, sequence, location, st_status in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
-                stops_by_trip[trip_id][key].append({"location": location, "status": st_status, "sequence": sequence})
+                stops_by_trip[trip_id][key].append({"id": stop_id, "location": location, "status": st_status, "sequence": sequence})
 
         return [
             {
