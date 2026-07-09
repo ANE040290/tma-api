@@ -352,9 +352,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="field">
         <label>Статус рейса</label>
         <select id="tf-status">
-          <option value="">все</option>
+          <option value="">активные (без завершённых)</option>
+          <option value="запланирован">запланирован</option>
           <option value="в пути">в пути</option>
-          <option value="снят">снят</option>
+          <option value="снят">снят (завершённые)</option>
         </select>
       </div>
       <div class="field">
@@ -559,6 +560,8 @@ function switchTab(name) {
   if (name === 'trips') loadTrips();
 }
 
+let editingTrips = new Set();
+
 async function loadTrips() {
   const status = document.getElementById('tf-status').value;
   const client = document.getElementById('tf-client').value.trim();
@@ -568,9 +571,11 @@ async function loadTrips() {
   if (client) params.set('client', client);
   const r = await fetch('/trips?' + params.toString());
   const data = await r.json();
+  const hideCompleted = !status;
+  const trips = hideCompleted ? data.trips.filter(t => t.status !== 'снят') : data.trips;
   const body = document.getElementById('trips-body');
   body.innerHTML = '';
-  data.trips.forEach(t => {
+  trips.forEach(t => {
     const combined = [...(t.pickups || []), ...(t.dropoffs || [])].sort((a, b) => a.sequence - b.sequence);
     let legs = [];
     for (let i = 0; i < combined.length - 1; i++) {
@@ -590,25 +595,41 @@ async function loadTrips() {
       const num = i === 0 ? String(t.id) : `${t.id}.${i}`;
       const legDone = leg.toStop && leg.toStop.status === 'исполнено';
       const legStatus = leg.toStop ? leg.toStop.status : '—';
+      const editing = i === 0 && editingTrips.has(t.id);
 
       const actionBtns = [];
-      if (i === 0 && t.status === 'запланирован') {
-        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); assignDevice(${t.id})">Назначить устройство</button>`);
-      }
-      if (i === 0 && t.status === 'в пути') {
-        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть</button>`);
-      }
-      if (leg.toStop && !legDone) {
-        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
+      if (editing) {
+        actionBtns.push(`<button onclick="event.stopPropagation(); saveDevice(${t.id})">Сохранить</button>`);
+        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditDevice(${t.id})">Отмена</button>`);
+      } else {
+        if (i === 0) {
+          const label = t.status === 'запланирован' ? 'Назначить устройство' : 'Изменить устройство';
+          actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); startEditDevice(${t.id})">${label}</button>`);
+        }
+        if (i === 0 && t.status === 'в пути') {
+          actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть</button>`);
+        }
+        if (leg.toStop && !legDone) {
+          actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
+        }
       }
 
-      tr.innerHTML = `
-        <td>${num}</td>
-        <td style="color:#999">${t.board_number || '—'}</td>
+      const deviceCells = editing ? `
+        <td><input id="edit-ezpu-${t.id}" value="${t.ezpu_serial || ''}" style="width:100px" onclick="event.stopPropagation()"></td>
+        <td><input id="edit-zpu-${t.id}" value="${t.zpu_number || ''}" style="width:90px" onclick="event.stopPropagation()"></td>
+        <td><input id="edit-tracker-${t.id}" value="${t.tracker_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
+        <td><input id="edit-lock-${t.id}" value="${t.lock_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
+      ` : `
         <td>${t.ezpu_serial || '—'}</td>
         <td>${t.zpu_number || '—'}</td>
         <td>${t.tracker_serial || '—'}</td>
         <td>${t.lock_serial || '—'}</td>
+      `;
+
+      tr.innerHTML = `
+        <td>${num}</td>
+        <td style="color:#999">${t.board_number || '—'}</td>
+        ${deviceCells}
         <td>${leg.from}</td>
         <td>${leg.to}</td>
         <td>${i === 0 ? fmtDate(t.hang_datetime) : ''}</td>
@@ -618,7 +639,7 @@ async function loadTrips() {
       body.appendChild(tr);
     });
   });
-  document.getElementById('trip-count-label').textContent = data.count + ' рейсов';
+  document.getElementById('trip-count-label').textContent = trips.length + ' рейсов' + (hideCompleted ? ' (без завершённых)' : '');
 }
 
 async function openTripDetail(id) {
@@ -794,21 +815,36 @@ async function closeTrip(id) {
   }
 }
 
-async function assignDevice(id) {
-  const ezpu = prompt('Серийный номер ЭЗПУ (можно оставить пустым):') || '';
-  const zpu = prompt('№ ЗПУ (разовая пломба, можно оставить пустым):') || '';
-  const tracker = prompt('Серийный номер трекера (можно оставить пустым):') || '';
-  if (!ezpu.trim() && !tracker.trim()) return;
+function startEditDevice(id) {
+  editingTrips.add(id);
+  loadTrips();
+}
+
+function cancelEditDevice(id) {
+  editingTrips.delete(id);
+  loadTrips();
+}
+
+async function saveDevice(id) {
+  const ezpu = document.getElementById('edit-ezpu-' + id).value.trim();
+  const zpu = document.getElementById('edit-zpu-' + id).value.trim();
+  const tracker = document.getElementById('edit-tracker-' + id).value.trim();
+  const lock = document.getElementById('edit-lock-' + id).value.trim();
+  if (!ezpu && !tracker) {
+    alert('Укажите хотя бы ЭЗПУ или трекер');
+    return;
+  }
   const r = await fetch('/trips/' + id + '/assign-device', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ezpu_serial: ezpu.trim(), zpu_number: zpu.trim(), tracker_serial: tracker.trim()}),
+    body: JSON.stringify({ezpu_serial: ezpu, zpu_number: zpu, tracker_serial: tracker, lock_serial: lock}),
   });
   if (r.status === 200) {
+    editingTrips.delete(id);
     loadTrips();
   } else {
     const data = await r.json();
-    alert(data.error || 'Ошибка назначения устройства');
+    alert(data.error || 'Ошибка сохранения устройства');
   }
 }
 
@@ -913,20 +949,25 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM trips WHERE id = %s", (trip_id,))
-        if not cur.fetchone():
+        cur.execute("SELECT status FROM trips WHERE id = %s", (trip_id,))
+        row = cur.fetchone()
+        if not row:
             return None
+        was_planned = row[0] == "запланирован"
 
-        cur.execute(
-            """
-            SELECT id, location FROM trip_stops
-            WHERE trip_id = %s AND stop_type = 'погрузка' AND status = 'ожидание'
-            ORDER BY sequence LIMIT 1
-            """,
-            (trip_id,),
-        )
-        stop_row = cur.fetchone()
-        location = stop_row[1] if stop_row else None
+        stop_row = None
+        location = None
+        if was_planned:
+            cur.execute(
+                """
+                SELECT id, location FROM trip_stops
+                WHERE trip_id = %s AND stop_type = 'погрузка' AND status = 'ожидание'
+                ORDER BY sequence LIMIT 1
+                """,
+                (trip_id,),
+            )
+            stop_row = cur.fetchone()
+            location = stop_row[1] if stop_row else None
 
         ezpu_id = _get_or_create_device(cur, ezpu_serial, "ezpu") if ezpu_serial else None
         tracker_id = _get_or_create_device(cur, tracker_serial, "tracker") if tracker_serial else None
@@ -940,20 +981,20 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
                 lock_device_id = COALESCE(%s, lock_device_id),
                 zpu_number = COALESCE(%s, zpu_number),
                 status = 'в пути',
-                hang_datetime = %s,
+                hang_datetime = CASE WHEN %s THEN %s ELSE hang_datetime END,
                 updated_at = now()
             WHERE id = %s
             """,
-            (ezpu_id, tracker_id, lock_id, zpu_number, assign_dt, trip_id),
+            (ezpu_id, tracker_id, lock_id, zpu_number, was_planned, assign_dt, trip_id),
         )
 
-        if stop_row:
+        if was_planned and stop_row:
             cur.execute(
                 "UPDATE trip_stops SET status = 'исполнено', completed_at = %s WHERE id = %s",
                 (assign_dt, stop_row[0]),
             )
 
-        if ezpu_id:
+        if was_planned and ezpu_id:
             cur.execute(
                 """
                 INSERT INTO operations
