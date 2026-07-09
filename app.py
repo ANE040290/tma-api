@@ -225,17 +225,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   header h1 { margin: 0; font-size: 18px; font-weight: 600; }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
   .panel { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px; }
+  .table-scroll table { min-width: 900px; }
   .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 12px; color: #666; }
   input, select, button { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  td.actions-cell { white-space: normal; min-width: 160px; }
+  td.actions-cell button { font-size: 12px; padding: 5px 8px; margin: 2px 3px 2px 0; }
   button { background: #1f2937; color: #fff; border: none; cursor: pointer; }
   button:hover { background: #374151; }
   button.secondary { background: #e5e7eb; color: #222; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #eee; }
   th { background: #f4f5f7; font-weight: 600; color: #444; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; border-bottom: 2px solid #e2e4e8; }
-  .panel { overflow-x: auto; }
   tr.device-row { cursor: pointer; }
   tr.device-row:hover { background: #f3f4f6; }
   .status-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #e5e7eb; }
@@ -350,12 +353,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <div class="panel">
     <div class="count" id="count-label">Загрузка...</div>
+    <div class="table-scroll">
     <table>
       <thead><tr>
         <th>Серийный номер</th><th>Тип</th><th>Статус</th><th>Местонахождение</th><th>Держатель</th><th>Последняя операция</th>
       </tr></thead>
       <tbody id="devices-body"></tbody>
     </table>
+    </div>
   </div>
 
   </div>
@@ -427,12 +432,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <div class="panel">
     <div class="count" id="trip-count-label">Загрузка...</div>
+    <div class="table-scroll">
     <table>
       <thead><tr>
         <th>№</th><th>Номер борта</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Снято</th><th>Статус</th><th></th>
       </tr></thead>
       <tbody id="trips-body"></tbody>
     </table>
+    </div>
   </div>
 
   </div>
@@ -655,7 +662,7 @@ async function loadTrips() {
       <td>${fmtDate(t.hang_datetime)}</td>
       <td>${t.removal_datetime ? fmtDate(t.removal_datetime) : '—'}</td>
       <td><span class="trip-status ${statusClass(t.status)}">${t.status}</span></td>
-      <td>${mainActions.join(' ')}</td>
+      <td class="actions-cell">${mainActions.join('')}</td>
     `;
     body.appendChild(mainRow);
 
@@ -697,7 +704,7 @@ async function loadTrips() {
         <td>${leg.toStop
           ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>'
           : ''}</td>
-        <td>${legActions.join(' ')}</td>
+        <td class="actions-cell">${legActions.join('')}</td>
       `;
       body.appendChild(tr);
     });
