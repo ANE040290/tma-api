@@ -262,6 +262,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .trip-status-исполнено { background: #dcfce7; color: #166534; }
   .trip-status-снят { background: #dcfce7; color: #166534; }
   .trip-status-в-пути { background: #dbeafe; color: #1e40af; }
+  .trip-main-row { font-weight: 600; border-top: 2px solid #d1d5db; }
+  .trip-main-row td { background: #f9fafb; }
+  .trip-leg-row { font-weight: 400; color: #777; font-size: 12px; }
+  .trip-leg-row td { padding-top: 5px; padding-bottom: 5px; }
+  .trip-leg-row .trip-status { font-size: 11px; }
   .waypoint-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
   .waypoint-row input { flex: 1; }
   .waypoint-row button { padding: 6px 10px; }
@@ -600,7 +605,7 @@ async function loadTrips() {
 
     legs.forEach((leg, i) => {
       const tr = document.createElement('tr');
-      tr.className = 'device-row';
+      tr.className = 'device-row ' + (i === 0 ? 'trip-main-row' : 'trip-leg-row');
       tr.onclick = () => openTripDetail(t.id);
       const num = i === 0 ? String(t.id) : `${t.id}.${i}`;
       const legDone = leg.toStop && leg.toStop.status === 'исполнено';
