@@ -20,7 +20,7 @@ import os
 import re
 import json
 import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pg8000
@@ -52,6 +52,39 @@ def json_default(o):
 
 
 # ---------- Логика работы с БД ----------
+
+def db_list_devices(status=None, device_type=None, limit=200):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        query = """
+            SELECT d.id, d.device_type, d.serial_number, d.status, d.current_location,
+                   d.last_operation_at, p.name
+            FROM devices d
+            LEFT JOIN parties p ON p.id = d.current_holder_id
+            WHERE 1=1
+        """
+        params = []
+        if status:
+            query += " AND d.status = %s"
+            params.append(status)
+        if device_type:
+            query += " AND d.device_type = %s"
+            params.append(device_type)
+        query += " ORDER BY d.serial_number LIMIT %s"
+        params.append(limit)
+        cur.execute(query, params)
+        return [
+            {
+                "id": r[0], "device_type": r[1], "serial_number": r[2],
+                "status": r[3], "current_location": r[4],
+                "last_operation_at": r[5], "current_holder": r[6],
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
 
 def db_get_device(serial):
     conn = get_connection()
@@ -189,11 +222,30 @@ class Handler(BaseHTTPRequestHandler):
         print("%s - %s" % (self.address_string(), format % args))
 
     def do_GET(self):
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parse_qs(parsed.query)
+
+        if path == "/health":
             self._send_json({"status": "ok", "time": datetime.datetime.utcnow().isoformat()})
             return
 
-        m = DEVICE_HISTORY_RE.match(self.path)
+        if path == "/devices":
+            status = qs.get("status", [None])[0]
+            device_type = qs.get("device_type", [None])[0]
+            try:
+                limit = int(qs.get("limit", ["200"])[0])
+            except ValueError:
+                limit = 200
+            try:
+                rows = db_list_devices(status=status, device_type=device_type, limit=limit)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(rows), "devices": rows})
+            return
+
+        m = DEVICE_HISTORY_RE.match(path)
         if m:
             serial = m.group(1)
             try:
@@ -207,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(rows)
             return
 
-        m = DEVICE_RE.match(self.path)
+        m = DEVICE_RE.match(path)
         if m:
             serial = m.group(1)
             try:
