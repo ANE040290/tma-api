@@ -931,7 +931,6 @@ function cancelEditDevice(id) {
 
 async function saveDevice(id) {
   const ezpu = document.getElementById('edit-ezpu-' + id).value.trim();
-  const zpu = document.getElementById('edit-zpu-' + id).value.trim();
   const tracker = document.getElementById('edit-tracker-' + id).value.trim();
   const lock = document.getElementById('edit-lock-' + id).value.trim();
   if (!ezpu && !tracker) {
@@ -941,7 +940,7 @@ async function saveDevice(id) {
   const r = await fetch('/trips/' + id + '/assign-device', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ezpu_serial: ezpu, zpu_number: zpu, tracker_serial: tracker, lock_serial: lock}),
+    body: JSON.stringify({ezpu_serial: ezpu, tracker_serial: tracker, lock_serial: lock}),
   });
   if (r.status === 200) {
     editingTrips.delete(id);
