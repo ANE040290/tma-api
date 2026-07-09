@@ -383,6 +383,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="field"><label>№ борта</label><input id="tr-board"></div>
       <div class="field"><label id="tr-tracker-label">Серийный номер трекера</label><input id="tr-tracker"></div>
       <div class="field"><label>Серийный номер ЭЗПУ</label><input id="tr-ezpu"></div>
+      <div class="field"><label>№ ЗПУ (разовая пломба)</label><input id="tr-zpu"></div>
       <div class="field"><label>Серийный номер закладки</label><input id="tr-lock"></div>
       <div class="field"><label>Город отправления</label><input id="tr-origin"></div>
       <div class="full">
@@ -412,7 +413,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="count" id="trip-count-label">Загрузка...</div>
     <table>
       <thead><tr>
-        <th>№</th><th>ЭЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Статус</th><th></th>
+        <th>№</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Статус</th><th></th>
       </tr></thead>
       <tbody id="trips-body"></tbody>
     </table>
@@ -579,15 +580,16 @@ async function loadTrips() {
     const assignBtn = t.status === 'запланирован'
       ? `<button class="secondary" onclick="event.stopPropagation(); assignDevice(${t.id})">Назначить устройство</button>`
       : '';
-    const pickupsHtml = (t.pickups && t.pickups.length ? t.pickups : [{location: '—', status: 'ожидание'}])
-      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.location}</div>`)
+    const pickupsHtml = (t.pickups && t.pickups.length ? t.pickups : [{location: '—', status: 'ожидание', sequence: null}])
+      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.sequence ? t.id + '.' + s.sequence + ' ' : ''}${s.location}</div>`)
       .join('');
-    const dropoffsHtml = (t.dropoffs && t.dropoffs.length ? t.dropoffs : [{location: '—', status: 'ожидание'}])
-      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.location}</div>`)
+    const dropoffsHtml = (t.dropoffs && t.dropoffs.length ? t.dropoffs : [{location: '—', status: 'ожидание', sequence: null}])
+      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.sequence ? t.id + '.' + s.sequence + ' ' : ''}${s.location}</div>`)
       .join('');
     tr.innerHTML = `
       <td>${t.id}${t.board_number ? '<br><span style="color:var(--text-secondary,#888)">' + t.board_number + '</span>' : ''}</td>
       <td>${t.ezpu_serial || '—'}</td>
+      <td>${t.zpu_number || '—'}</td>
       <td>${t.tracker_serial || '—'}</td>
       <td>${t.lock_serial || '—'}</td>
       <td>${pickupsHtml}</td>
@@ -618,12 +620,12 @@ async function openTripDetail(id) {
     const btn = done
       ? '<span style="color:#166534">✓ ' + fmtDate(s.completed_at) + '</span>'
       : `<button class="secondary" onclick="completeStop(${id}, ${s.id})">Исполнено</button>`;
-    return `<div class="hist-row"><b>${s.stop_type}</b> · ${s.location} ${btn}</div>`;
+    return `<div class="hist-row"><b>${id}.${s.sequence}</b> ${s.stop_type} · ${s.location} ${btn}</div>`;
   }).join('');
   document.getElementById('trip-detail-body').innerHTML = `
     <div style="margin-bottom:10px">
       Клиент: ${t.client || '—'} · Подрядчик: ${t.contractor || '—'} · № борта: ${t.board_number || '—'}<br>
-      ЭЗПУ: ${t.ezpu_serial || '—'} · Трекер: ${t.tracker_serial || '—'} · Закладка: ${t.lock_serial || '—'} ·
+      ЭЗПУ: ${t.ezpu_serial || '—'} · № ЗПУ: ${t.zpu_number || '—'} · Трекер: ${t.tracker_serial || '—'} · Закладка: ${t.lock_serial || '—'} ·
       Статус: <span class="trip-status trip-status-${t.status}">${t.status}</span>
     </div>
     ${rows}
@@ -689,7 +691,7 @@ function collectStops(containerId) {
 }
 
 function resetTripForm() {
-  ['tr-client','tr-contractor','tr-board','tr-ezpu','tr-tracker','tr-lock','tr-origin','tr-notes'].forEach(id => {
+  ['tr-client','tr-contractor','tr-board','tr-ezpu','tr-zpu','tr-tracker','tr-lock','tr-origin','tr-notes'].forEach(id => {
     document.getElementById(id).value = '';
   });
   document.getElementById('pickups-list').innerHTML = '';
@@ -708,6 +710,7 @@ async function submitTrip() {
   const dropoffs = collectStops('dropoffs-list');
   const contractor = document.getElementById('tr-contractor').value;
   const ezpu = document.getElementById('tr-ezpu').value.trim();
+  const zpu = document.getElementById('tr-zpu').value.trim();
   const tracker = document.getElementById('tr-tracker').value.trim();
   const lock = document.getElementById('tr-lock').value.trim();
 
@@ -734,6 +737,7 @@ async function submitTrip() {
     pickups: pickups,
     dropoffs: dropoffs,
     ezpu_serial: ezpu,
+    zpu_number: zpu,
     tracker_serial: tracker,
     lock_serial: lock,
     origin_city: document.getElementById('tr-origin').value.trim(),
@@ -774,12 +778,13 @@ async function closeTrip(id) {
 
 async function assignDevice(id) {
   const ezpu = prompt('Серийный номер ЭЗПУ (можно оставить пустым):') || '';
+  const zpu = prompt('№ ЗПУ (разовая пломба, можно оставить пустым):') || '';
   const tracker = prompt('Серийный номер трекера (можно оставить пустым):') || '';
   if (!ezpu.trim() && !tracker.trim()) return;
   const r = await fetch('/trips/' + id + '/assign-device', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ezpu_serial: ezpu.trim(), tracker_serial: tracker.trim()}),
+    body: JSON.stringify({ezpu_serial: ezpu.trim(), zpu_number: zpu.trim(), tracker_serial: tracker.trim()}),
   });
   if (r.status === 200) {
     loadTrips();
@@ -825,12 +830,13 @@ def db_create_trip(payload):
             """
             INSERT INTO trips
                 (client_id, contractor_id, board_number, warehouse, ezpu_device_id, tracker_device_id,
-                 lock_device_id, origin_city, destination_city, hang_datetime, status, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 lock_device_id, zpu_number, origin_city, destination_city, hang_datetime, status, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (client_id, contractor_id, payload["board_number"], pickups[0] if pickups else None, ezpu_id, tracker_id,
-             lock_id, payload["origin_city"], dropoffs[-1] if dropoffs else None, payload["hang_datetime"], status, payload["notes"]),
+             lock_id, payload["zpu_number"], payload["origin_city"], dropoffs[-1] if dropoffs else None,
+             payload["hang_datetime"], status, payload["notes"]),
         )
         trip_id = cur.fetchone()[0]
 
@@ -885,9 +891,7 @@ def db_create_trip(payload):
         conn.close()
 
 
-def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt):
-    conn = get_connection()
-def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, assign_dt):
+def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu_number, assign_dt):
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -916,12 +920,13 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, ass
                 ezpu_device_id = COALESCE(%s, ezpu_device_id),
                 tracker_device_id = COALESCE(%s, tracker_device_id),
                 lock_device_id = COALESCE(%s, lock_device_id),
+                zpu_number = COALESCE(%s, zpu_number),
                 status = 'в пути',
                 hang_datetime = %s,
                 updated_at = now()
             WHERE id = %s
             """,
-            (ezpu_id, tracker_id, lock_id, assign_dt, trip_id),
+            (ezpu_id, tracker_id, lock_id, zpu_number, assign_dt, trip_id),
         )
 
         if stop_row:
@@ -1019,7 +1024,7 @@ def db_get_trip(trip_id):
         cur.execute(
             """
             SELECT t.id, c.name, ct.name, t.board_number, t.warehouse,
-                   de.serial_number, dt.serial_number, dl.serial_number,
+                   de.serial_number, dt.serial_number, dl.serial_number, t.zpu_number,
                    t.origin_city, t.destination_city, t.hang_datetime,
                    t.arrival_at_unload_datetime, t.removal_datetime, t.status, t.notes
             FROM trips t
@@ -1045,10 +1050,10 @@ def db_get_trip(trip_id):
         ]
         return {
             "id": r[0], "client": r[1], "contractor": r[2], "board_number": r[3], "warehouse": r[4],
-            "ezpu_serial": r[5], "tracker_serial": r[6], "lock_serial": r[7],
-            "origin_city": r[8], "destination_city": r[9], "hang_datetime": r[10],
-            "arrival_at_unload_datetime": r[11], "removal_datetime": r[12],
-            "status": r[13], "notes": r[14], "stops": stops,
+            "ezpu_serial": r[5], "tracker_serial": r[6], "lock_serial": r[7], "zpu_number": r[8],
+            "origin_city": r[9], "destination_city": r[10], "hang_datetime": r[11],
+            "arrival_at_unload_datetime": r[12], "removal_datetime": r[13],
+            "status": r[14], "notes": r[15], "stops": stops,
         }
     finally:
         conn.close()
@@ -1060,7 +1065,7 @@ def db_list_trips(status=None, client=None, limit=200):
         cur = conn.cursor()
         query = """
             SELECT t.id, c.name, ct.name, t.board_number, de.serial_number, dt.serial_number, dl.serial_number,
-                   t.origin_city, t.destination_city, t.hang_datetime, t.status
+                   t.zpu_number, t.origin_city, t.destination_city, t.hang_datetime, t.status
             FROM trips t
             LEFT JOIN clients c ON c.id = t.client_id
             LEFT JOIN parties ct ON ct.id = t.contractor_id
@@ -1086,22 +1091,22 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT trip_id, stop_type, location, status FROM trip_stops
+                SELECT trip_id, stop_type, sequence, location, status FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for trip_id, stop_type, location, st_status in cur.fetchall():
+            for trip_id, stop_type, sequence, location, st_status in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
-                stops_by_trip[trip_id][key].append({"location": location, "status": st_status})
+                stops_by_trip[trip_id][key].append({"location": location, "status": st_status, "sequence": sequence})
 
         return [
             {
                 "id": r[0], "client": r[1], "contractor": r[2], "board_number": r[3],
-                "ezpu_serial": r[4], "tracker_serial": r[5], "lock_serial": r[6],
-                "origin_city": r[7], "destination_city": r[8],
-                "hang_datetime": r[9], "status": r[10],
+                "ezpu_serial": r[4], "tracker_serial": r[5], "lock_serial": r[6], "zpu_number": r[7],
+                "origin_city": r[8], "destination_city": r[9],
+                "hang_datetime": r[10], "status": r[11],
                 "pickups": stops_by_trip.get(r[0], {}).get("pickups", []),
                 "dropoffs": stops_by_trip.get(r[0], {}).get("dropoffs", []),
             }
@@ -1406,6 +1411,7 @@ class Handler(BaseHTTPRequestHandler):
             "ezpu_serial": ezpu_serial,
             "tracker_serial": tracker_serial,
             "lock_serial": lock_serial,
+            "zpu_number": (body.get("zpu_number") or "").strip() or None,
             "origin_city": body.get("origin_city"),
             "hang_datetime": hang_dt,
             "notes": body.get("notes"),
@@ -1476,7 +1482,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, assign_dt)
+            result = db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial,
+                                            (body.get("zpu_number") or "").strip() or None, assign_dt)
         except Exception as e:
             self._send_json({"error": str(e)}, status=500)
             return
