@@ -207,9 +207,262 @@ def db_create_operation(payload):
         conn.close()
 
 
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ТМА — учёт ЭЗПУ и трекеров</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; background: #f4f4f2; color: #222; }
+  header { background: #1f2937; color: #fff; padding: 16px 24px; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  .panel { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: #666; }
+  input, select, button { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  button { background: #1f2937; color: #fff; border: none; cursor: pointer; }
+  button:hover { background: #374151; }
+  button.secondary { background: #e5e7eb; color: #222; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; }
+  th { background: #f9fafb; font-weight: 600; color: #444; }
+  tr.device-row { cursor: pointer; }
+  tr.device-row:hover { background: #f3f4f6; }
+  .status-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #e5e7eb; }
+  .status-рабочая, .status-рабочий { background: #dcfce7; color: #166534; }
+  .status-неисправная, .status-неисправный { background: #fee2e2; color: #991b1b; }
+  .count { color: #666; font-size: 13px; margin-bottom: 8px; }
+  #history-panel, #form-panel { display: none; }
+  #history-panel.open, #form-panel.open { display: block; }
+  .close-btn { float: right; background: none; color: #666; font-size: 18px; padding: 0 4px; }
+  .hist-row { padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 13px; }
+  .hist-row b { color: #1f2937; }
+  .op-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .op-form .full { grid-column: 1 / -1; }
+  #msg { margin-top: 10px; font-size: 13px; }
+  #msg.ok { color: #166534; }
+  #msg.err { color: #991b1b; }
+</style>
+</head>
+<body>
+<header><h1>ТМА — учёт ЭЗПУ и трекеров</h1></header>
+<div class="wrap">
+
+  <div class="panel">
+    <div class="filters">
+      <div class="field">
+        <label>Серийный номер</label>
+        <input id="f-search" placeholder="GNS20776">
+      </div>
+      <div class="field">
+        <label>Статус</label>
+        <input id="f-status" placeholder="рабочая, неисправная...">
+      </div>
+      <div class="field">
+        <label>Тип</label>
+        <select id="f-type">
+          <option value="">все</option>
+          <option value="ezpu">ЭЗПУ</option>
+          <option value="tracker">трекер</option>
+        </select>
+      </div>
+      <button onclick="loadDevices()">Найти</button>
+      <button class="secondary" onclick="clearFilters()">Сбросить</button>
+      <button class="secondary" onclick="openForm()" style="margin-left:auto">+ Новая операция</button>
+    </div>
+  </div>
+
+  <div class="panel" id="form-panel">
+    <button class="close-btn" onclick="closeForm()">×</button>
+    <h3>Новая операция</h3>
+    <div class="op-form">
+      <div class="field"><label>Серийный номер устройства *</label><input id="op-serial"></div>
+      <div class="field">
+        <label>Тип операции *</label>
+        <select id="op-type">
+          <option value="навешивание">навешивание</option>
+          <option value="снятие">снятие</option>
+          <option value="передача">передача</option>
+          <option value="возврат">возврат</option>
+          <option value="ремонт">ремонт</option>
+          <option value="списание">списание</option>
+        </select>
+      </div>
+      <div class="field"><label>Откуда</label><input id="op-from"></div>
+      <div class="field"><label>Куда</label><input id="op-to"></div>
+      <div class="field"><label>Местонахождение</label><input id="op-location"></div>
+      <div class="field"><label>Документ / основание</label><input id="op-doc"></div>
+      <div class="full"><button onclick="submitOperation()">Сохранить операцию</button></div>
+      <div class="full" id="msg"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="history-panel">
+    <button class="close-btn" onclick="closeHistory()">×</button>
+    <h3 id="hist-title">История</h3>
+    <div id="hist-body"></div>
+  </div>
+
+  <div class="panel">
+    <div class="count" id="count-label">Загрузка...</div>
+    <table>
+      <thead><tr>
+        <th>Серийный номер</th><th>Тип</th><th>Статус</th><th>Местонахождение</th><th>Держатель</th><th>Последняя операция</th>
+      </tr></thead>
+      <tbody id="devices-body"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+function fmtDate(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  return d.toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+
+async function loadDevices() {
+  const search = document.getElementById('f-search').value.trim();
+  const status = document.getElementById('f-status').value.trim();
+  const type = document.getElementById('f-type').value;
+  document.getElementById('count-label').textContent = 'Загрузка...';
+
+  if (search) {
+    const r = await fetch('/devices/' + encodeURIComponent(search));
+    const body = document.getElementById('devices-body');
+    body.innerHTML = '';
+    if (r.status === 404) {
+      document.getElementById('count-label').textContent = 'Устройство не найдено';
+      return;
+    }
+    const d = await r.json();
+    renderRows([d]);
+    document.getElementById('count-label').textContent = '1 устройство';
+    return;
+  }
+
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (type) params.set('device_type', type);
+  const r = await fetch('/devices?' + params.toString());
+  const data = await r.json();
+  renderRows(data.devices);
+  document.getElementById('count-label').textContent = data.count + ' устройств';
+}
+
+function renderRows(devices) {
+  const body = document.getElementById('devices-body');
+  body.innerHTML = '';
+  devices.forEach(d => {
+    const tr = document.createElement('tr');
+    tr.className = 'device-row';
+    tr.onclick = () => openHistory(d.serial_number);
+    tr.innerHTML = `
+      <td>${d.serial_number}</td>
+      <td>${d.device_type === 'ezpu' ? 'ЭЗПУ' : 'трекер'}</td>
+      <td><span class="status-pill status-${d.status}">${d.status}</span></td>
+      <td>${d.current_location || '—'}</td>
+      <td>${d.current_holder || '—'}</td>
+      <td>${fmtDate(d.last_operation_at)}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function clearFilters() {
+  document.getElementById('f-search').value = '';
+  document.getElementById('f-status').value = '';
+  document.getElementById('f-type').value = '';
+  loadDevices();
+}
+
+async function openHistory(serial) {
+  const panel = document.getElementById('history-panel');
+  panel.classList.add('open');
+  document.getElementById('hist-title').textContent = 'История: ' + serial;
+  document.getElementById('hist-body').innerHTML = 'Загрузка...';
+  const r = await fetch('/devices/' + encodeURIComponent(serial) + '/history');
+  const rows = await r.json();
+  if (!rows.length) {
+    document.getElementById('hist-body').innerHTML = 'Операций пока нет';
+    return;
+  }
+  document.getElementById('hist-body').innerHTML = rows.map(op => `
+    <div class="hist-row">
+      <b>${op.operation_type}</b> · ${op.from || '—'} → ${op.to || '—'} · ${op.location || '—'} · ${fmtDate(op.operation_dt)}
+      ${op.document_ref ? '<br><span style="color:#888">' + op.document_ref + '</span>' : ''}
+    </div>
+  `).join('');
+  panel.scrollIntoView({behavior: 'smooth'});
+}
+function closeHistory() { document.getElementById('history-panel').classList.remove('open'); }
+
+function openForm() {
+  document.getElementById('form-panel').classList.add('open');
+  document.getElementById('form-panel').scrollIntoView({behavior: 'smooth'});
+}
+function closeForm() { document.getElementById('form-panel').classList.remove('open'); }
+
+async function submitOperation() {
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  msg.className = '';
+  const payload = {
+    device_serial: document.getElementById('op-serial').value.trim(),
+    operation_type: document.getElementById('op-type').value,
+    from_party: document.getElementById('op-from').value.trim(),
+    to_party: document.getElementById('op-to').value.trim(),
+    location: document.getElementById('op-location').value.trim(),
+    document_ref: document.getElementById('op-doc').value.trim(),
+  };
+  if (!payload.device_serial) {
+    msg.textContent = 'Укажите серийный номер устройства';
+    msg.className = 'err';
+    return;
+  }
+  const r = await fetch('/operations', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (r.status === 201) {
+    msg.textContent = 'Операция сохранена, id ' + data.id;
+    msg.className = 'ok';
+    document.getElementById('op-serial').value = '';
+    document.getElementById('op-from').value = '';
+    document.getElementById('op-to').value = '';
+    document.getElementById('op-location').value = '';
+    document.getElementById('op-doc').value = '';
+    loadDevices();
+  } else {
+    msg.textContent = data.error || 'Ошибка сохранения';
+    msg.className = 'err';
+  }
+}
+
+loadDevices();
+</script>
+</body>
+</html>"""
+
+
 # ---------- HTTP-сервер ----------
 
 class Handler(BaseHTTPRequestHandler):
+    def _send_html(self, html, status=200):
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_json(self, data, status=200):
         body = json.dumps(data, default=json_default, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -225,6 +478,10 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
+
+        if path in ("/dashboard", "/"):
+            self._send_html(DASHBOARD_HTML)
+            return
 
         if path == "/health":
             self._send_json({"status": "ok", "time": datetime.datetime.utcnow().isoformat()})
