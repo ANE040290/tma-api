@@ -32,6 +32,7 @@ DEVICE_RE = re.compile(r"^/devices/([^/]+)$")
 DEVICE_HISTORY_RE = re.compile(r"^/devices/([^/]+)/history$")
 TRIP_RE = re.compile(r"^/trips/(\d+)$")
 TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
+TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 
 
 def get_connection():
@@ -255,6 +256,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .tab-view.active { display: block; }
   .trip-status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #dbeafe; color: #1e40af; }
   .trip-status-снят { background: #dcfce7; color: #166534; }
+  .trip-status-запланирован { background: #fef3c7; color: #92400e; }
   .waypoint-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
   .waypoint-row input { flex: 1; }
   .waypoint-row button { padding: 6px 10px; }
@@ -557,6 +559,9 @@ async function loadTrips() {
     const closeBtn = t.status === 'в пути'
       ? `<button class="secondary" onclick="closeTrip(${t.id})">Закрыть</button>`
       : '';
+    const assignBtn = t.status === 'запланирован'
+      ? `<button class="secondary" onclick="assignDevice(${t.id})">Назначить устройство</button>`
+      : '';
     tr.innerHTML = `
       <td>${t.id}</td>
       <td>${t.client || '—'}</td>
@@ -566,7 +571,7 @@ async function loadTrips() {
       <td>${route}</td>
       <td>${fmtDate(t.hang_datetime)}</td>
       <td><span class="trip-status trip-status-${t.status}">${t.status}</span></td>
-      <td>${closeBtn}</td>
+      <td>${closeBtn} ${assignBtn}</td>
     `;
     body.appendChild(tr);
   });
@@ -629,17 +634,12 @@ async function submitTrip() {
   const ezpu = document.getElementById('tr-ezpu').value.trim();
   const tracker = document.getElementById('tr-tracker').value.trim();
 
-  if (!ezpu && !tracker) {
-    msg.textContent = 'Укажите серийный номер ЭЗПУ или трекера';
-    msg.className = 'err';
-    return;
-  }
   if (!warehouse) {
     msg.textContent = 'Склад отгрузки обязателен';
     msg.className = 'err';
     return;
   }
-  if (contractor === MEGAPOLIS_NAME && !tracker) {
+  if (contractor === MEGAPOLIS_NAME && (ezpu || tracker) && !tracker) {
     msg.textContent = 'Для подрядчика «' + MEGAPOLIS_NAME + '» обязателен номер трекера';
     msg.className = 'err';
     return;
@@ -690,6 +690,23 @@ async function closeTrip(id) {
   }
 }
 
+async function assignDevice(id) {
+  const ezpu = prompt('Серийный номер ЭЗПУ (можно оставить пустым):') || '';
+  const tracker = prompt('Серийный номер трекера (можно оставить пустым):') || '';
+  if (!ezpu.trim() && !tracker.trim()) return;
+  const r = await fetch('/trips/' + id + '/assign-device', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ezpu_serial: ezpu.trim(), tracker_serial: tracker.trim()}),
+  });
+  if (r.status === 200) {
+    loadTrips();
+  } else {
+    const data = await r.json();
+    alert(data.error || 'Ошибка назначения устройства');
+  }
+}
+
 loadDevices();
 </script>
 </body>
@@ -716,16 +733,18 @@ def db_create_trip(payload):
         ezpu_id = _get_or_create_device(cur, payload["ezpu_serial"], "ezpu") if payload["ezpu_serial"] else None
         tracker_id = _get_or_create_device(cur, payload["tracker_serial"], "tracker") if payload["tracker_serial"] else None
 
+        status = "в пути" if (ezpu_id or tracker_id) else "запланирован"
+
         cur.execute(
             """
             INSERT INTO trips
                 (client_id, contractor_id, board_number, warehouse, ezpu_device_id, tracker_device_id,
                  origin_city, destination_city, hang_datetime, status, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'в пути', %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (client_id, contractor_id, payload["board_number"], payload["warehouse"], ezpu_id, tracker_id,
-             payload["origin_city"], payload["destination_city"], payload["hang_datetime"], payload["notes"]),
+             payload["origin_city"], payload["destination_city"], payload["hang_datetime"], status, payload["notes"]),
         )
         trip_id = cur.fetchone()[0]
 
@@ -757,6 +776,58 @@ def db_create_trip(payload):
 
         conn.commit()
         return trip_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt, warehouse_override):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT warehouse, status FROM trips WHERE id = %s", (trip_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        warehouse = warehouse_override or row[0]
+
+        ezpu_id = _get_or_create_device(cur, ezpu_serial, "ezpu") if ezpu_serial else None
+        tracker_id = _get_or_create_device(cur, tracker_serial, "tracker") if tracker_serial else None
+
+        cur.execute(
+            """
+            UPDATE trips SET
+                ezpu_device_id = COALESCE(%s, ezpu_device_id),
+                tracker_device_id = COALESCE(%s, tracker_device_id),
+                status = 'в пути',
+                hang_datetime = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (ezpu_id, tracker_id, assign_dt, trip_id),
+        )
+
+        if ezpu_id:
+            cur.execute(
+                """
+                INSERT INTO operations
+                    (device_id, trip_id, operation_type, location, operation_dt)
+                VALUES (%s, %s, 'навешивание', %s, %s)
+                """,
+                (ezpu_id, trip_id, warehouse, assign_dt),
+            )
+            cur.execute(
+                """
+                UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (warehouse, assign_dt, ezpu_id),
+            )
+
+        conn.commit()
+        return True
     except Exception:
         conn.rollback()
         raise
@@ -1008,6 +1079,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_close_trip(int(m.group(1)))
             return
 
+        m = TRIP_ASSIGN_RE.match(path)
+        if m:
+            self._handle_assign_device(int(m.group(1)))
+            return
+
         self._send_json({"error": "не найдено"}, status=404)
 
     def _read_json_body(self):
@@ -1086,15 +1162,11 @@ class Handler(BaseHTTPRequestHandler):
         warehouse = (body.get("warehouse") or "").strip() or None
         contractor = (body.get("contractor") or "").strip() or None
 
-        if not ezpu_serial and not tracker_serial:
-            self._send_json({"error": "Укажите хотя бы ezpu_serial или tracker_serial"}, status=400)
-            return
-
         if not warehouse:
             self._send_json({"error": "Склад отгрузки обязателен (поле warehouse)"}, status=400)
             return
 
-        if contractor == self.MEGAPOLIS_NAME and not tracker_serial:
+        if contractor == self.MEGAPOLIS_NAME and (ezpu_serial or tracker_serial) and not tracker_serial:
             self._send_json(
                 {"error": f"Для подрядчика «{self.MEGAPOLIS_NAME}» обязателен номер трекера (tracker_serial)"},
                 status=400,
@@ -1160,6 +1232,48 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"id": trip_id, "status": "closed"})
+
+    def _handle_assign_device(self, trip_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        ezpu_serial = (body.get("ezpu_serial") or "").strip() or None
+        tracker_serial = (body.get("tracker_serial") or "").strip() or None
+        contractor = (body.get("contractor") or "").strip() or None
+
+        if not ezpu_serial and not tracker_serial:
+            self._send_json({"error": "Укажите ezpu_serial или tracker_serial"}, status=400)
+            return
+
+        if contractor == self.MEGAPOLIS_NAME and not tracker_serial:
+            self._send_json(
+                {"error": f"Для подрядчика «{self.MEGAPOLIS_NAME}» обязателен номер трекера (tracker_serial)"},
+                status=400,
+            )
+            return
+
+        try:
+            assign_dt = self._parse_dt(body.get("assign_datetime"))
+        except ValueError:
+            self._send_json({"error": "assign_datetime должен быть в формате ISO 8601"}, status=400)
+            return
+
+        warehouse_override = (body.get("warehouse") or "").strip() or None
+
+        try:
+            result = db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, assign_dt, warehouse_override)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if result is None:
+            self._send_json({"error": f"Рейс {trip_id} не найден"}, status=404)
+            return
+
+        self._send_json({"id": trip_id, "status": "device_assigned"})
 
 
 if __name__ == "__main__":
