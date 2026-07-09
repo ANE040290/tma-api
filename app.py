@@ -281,7 +281,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .waypoint-row button { padding: 6px 10px; }
   .stop-line { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .stop-line:not(:last-child) { margin-bottom: 3px; }
-  .stop-dot { width: 7px; height: 7px; border-radius: 50%; background: #d1d5db; flex-shrink: 0; }
+  .stop-dot { width: 7px; height: 7px; border-radius: 50%; background: #ef4444; flex-shrink: 0; }
   .stop-dot.done { background: #22c55e; }
 </style>
 </head>
@@ -616,8 +616,14 @@ async function loadTrips() {
       legs.push({from: '—', to: '—', fromStop: null, toStop: null});
     }
 
-    const firstLocation = combined.length ? combined[0].location : '—';
-    const lastLocation = combined.length ? combined[combined.length - 1].location : '—';
+    const pickupsList = (t.pickups && t.pickups.length ? t.pickups : [])
+      .slice().sort((a, b) => a.sequence - b.sequence)
+      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.location}</div>`)
+      .join('') || '—';
+    const dropoffsList = (t.dropoffs && t.dropoffs.length ? t.dropoffs : [])
+      .slice().sort((a, b) => a.sequence - b.sequence)
+      .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.location}</div>`)
+      .join('') || '—';
     const dropoffs = t.dropoffs || [];
     const allDropoffsDone = dropoffs.length > 0 && dropoffs.every(s => s.status === 'исполнено');
     const editingDevice = editingTrips.has(t.id);
@@ -657,8 +663,8 @@ async function loadTrips() {
       <td>${t.id}</td>
       <td>${t.board_number || '—'}</td>
       ${mainDeviceCells}
-      <td>${firstLocation}</td>
-      <td>${lastLocation}</td>
+      <td>${pickupsList}</td>
+      <td>${dropoffsList}</td>
       <td>${fmtDate(t.hang_datetime)}</td>
       <td>${t.removal_datetime ? fmtDate(t.removal_datetime) : '—'}</td>
       <td><span class="trip-status ${statusClass(t.status)}">${t.status}</span></td>
