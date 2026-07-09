@@ -30,6 +30,8 @@ ALLOWED_OPERATION_TYPES = {"навешивание", "снятие", "перед
 
 DEVICE_RE = re.compile(r"^/devices/([^/]+)$")
 DEVICE_HISTORY_RE = re.compile(r"^/devices/([^/]+)/history$")
+TRIP_RE = re.compile(r"^/trips/(\d+)$")
+TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
 
 
 def get_connection():
@@ -452,7 +454,177 @@ loadDevices();
 </html>"""
 
 
-# ---------- HTTP-сервер ----------
+def _get_or_create_client(cur, name):
+    if not name:
+        return None
+    cur.execute("SELECT id FROM clients WHERE name = %s", (name,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute("INSERT INTO clients (name) VALUES (%s) RETURNING id", (name,))
+    return cur.fetchone()[0]
+
+
+def db_create_trip(payload):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        client_id = _get_or_create_client(cur, payload["client"])
+        ezpu_id = _get_or_create_device(cur, payload["ezpu_serial"], "ezpu") if payload["ezpu_serial"] else None
+        tracker_id = _get_or_create_device(cur, payload["tracker_serial"], "tracker") if payload["tracker_serial"] else None
+
+        cur.execute(
+            """
+            INSERT INTO trips
+                (client_id, board_number, warehouse, ezpu_device_id, tracker_device_id,
+                 origin_city, destination_city, hang_datetime, status, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'в пути', %s)
+            RETURNING id
+            """,
+            (client_id, payload["board_number"], payload["warehouse"], ezpu_id, tracker_id,
+             payload["origin_city"], payload["destination_city"], payload["hang_datetime"], payload["notes"]),
+        )
+        trip_id = cur.fetchone()[0]
+
+        if ezpu_id:
+            cur.execute(
+                """
+                INSERT INTO operations
+                    (device_id, trip_id, operation_type, location, operation_dt, document_ref)
+                VALUES (%s, %s, 'навешивание', %s, %s, %s)
+                """,
+                (ezpu_id, trip_id, payload["origin_city"], payload["hang_datetime"], payload["board_number"]),
+            )
+            cur.execute(
+                """
+                UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (payload["origin_city"], payload["hang_datetime"], ezpu_id),
+            )
+
+        conn.commit()
+        return trip_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_get_trip(trip_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.id, c.name, t.board_number, t.warehouse,
+                   de.serial_number, dt.serial_number,
+                   t.origin_city, t.destination_city, t.hang_datetime,
+                   t.arrival_at_unload_datetime, t.removal_datetime, t.status, t.notes
+            FROM trips t
+            LEFT JOIN clients c ON c.id = t.client_id
+            LEFT JOIN devices de ON de.id = t.ezpu_device_id
+            LEFT JOIN devices dt ON dt.id = t.tracker_device_id
+            WHERE t.id = %s
+            """,
+            (trip_id,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "id": r[0], "client": r[1], "board_number": r[2], "warehouse": r[3],
+            "ezpu_serial": r[4], "tracker_serial": r[5],
+            "origin_city": r[6], "destination_city": r[7], "hang_datetime": r[8],
+            "arrival_at_unload_datetime": r[9], "removal_datetime": r[10],
+            "status": r[11], "notes": r[12],
+        }
+    finally:
+        conn.close()
+
+
+def db_list_trips(status=None, client=None, limit=200):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        query = """
+            SELECT t.id, c.name, t.board_number, de.serial_number, dt.serial_number,
+                   t.origin_city, t.destination_city, t.hang_datetime, t.status
+            FROM trips t
+            LEFT JOIN clients c ON c.id = t.client_id
+            LEFT JOIN devices de ON de.id = t.ezpu_device_id
+            LEFT JOIN devices dt ON dt.id = t.tracker_device_id
+            WHERE 1=1
+        """
+        params = []
+        if status:
+            query += " AND t.status = %s"
+            params.append(status)
+        if client:
+            query += " AND c.name = %s"
+            params.append(client)
+        query += " ORDER BY t.hang_datetime DESC LIMIT %s"
+        params.append(limit)
+        cur.execute(query, params)
+        return [
+            {
+                "id": r[0], "client": r[1], "board_number": r[2],
+                "ezpu_serial": r[3], "tracker_serial": r[4],
+                "origin_city": r[5], "destination_city": r[6],
+                "hang_datetime": r[7], "status": r[8],
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def db_close_trip(trip_id, removal_dt, location):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT ezpu_device_id FROM trips WHERE id = %s", (trip_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        ezpu_id = row[0]
+
+        cur.execute(
+            """
+            UPDATE trips SET removal_datetime = %s, status = 'снят', updated_at = now()
+            WHERE id = %s
+            """,
+            (removal_dt, trip_id),
+        )
+
+        if ezpu_id:
+            cur.execute(
+                """
+                INSERT INTO operations
+                    (device_id, trip_id, operation_type, location, operation_dt)
+                VALUES (%s, %s, 'снятие', %s, %s)
+                """,
+                (ezpu_id, trip_id, location, removal_dt),
+            )
+            cur.execute(
+                """
+                UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (location, removal_dt, ezpu_id),
+            )
+
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+
 
 class Handler(BaseHTTPRequestHandler):
     def _send_html(self, html, status=200):
@@ -502,6 +674,35 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"count": len(rows), "devices": rows})
             return
 
+        if path == "/trips":
+            status = qs.get("status", [None])[0]
+            client = qs.get("client", [None])[0]
+            try:
+                limit = int(qs.get("limit", ["200"])[0])
+            except ValueError:
+                limit = 200
+            try:
+                rows = db_list_trips(status=status, client=client, limit=limit)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(rows), "trips": rows})
+            return
+
+        m = TRIP_RE.match(path)
+        if m:
+            trip_id = int(m.group(1))
+            try:
+                trip = db_get_trip(trip_id)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            if not trip:
+                self._send_json({"error": f"Рейс {trip_id} не найден"}, status=404)
+                return
+            self._send_json(trip)
+            return
+
         m = DEVICE_HISTORY_RE.match(path)
         if m:
             serial = m.group(1)
@@ -533,14 +734,31 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": "не найдено"}, status=404)
 
     def do_POST(self):
-        if self.path != "/operations":
-            self._send_json({"error": "не найдено"}, status=404)
+        path = urlparse(self.path).path
+
+        if path == "/operations":
+            self._handle_create_operation()
             return
 
+        if path == "/trips":
+            self._handle_create_trip()
+            return
+
+        m = TRIP_CLOSE_RE.match(path)
+        if m:
+            self._handle_close_trip(int(m.group(1)))
+            return
+
+        self._send_json({"error": "не найдено"}, status=404)
+
+    def _read_json_body(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
+        return json.loads(raw)
+
+    def _handle_create_operation(self):
         try:
-            body = json.loads(raw)
+            body = self._read_json_body()
         except json.JSONDecodeError:
             self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
             return
@@ -587,6 +805,80 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"id": new_id, "status": "created"}, status=201)
+
+    def _parse_dt(self, raw, default_now=True):
+        if raw:
+            return datetime.datetime.fromisoformat(raw)
+        if default_now:
+            return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+        return None
+
+    def _handle_create_trip(self):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        ezpu_serial = (body.get("ezpu_serial") or "").strip() or None
+        tracker_serial = (body.get("tracker_serial") or "").strip() or None
+
+        if not ezpu_serial and not tracker_serial:
+            self._send_json({"error": "Укажите хотя бы ezpu_serial или tracker_serial"}, status=400)
+            return
+
+        try:
+            hang_dt = self._parse_dt(body.get("hang_datetime"))
+        except ValueError:
+            self._send_json({"error": "hang_datetime должен быть в формате ISO 8601"}, status=400)
+            return
+
+        payload = {
+            "client": (body.get("client") or "").strip() or None,
+            "board_number": body.get("board_number"),
+            "warehouse": body.get("warehouse"),
+            "ezpu_serial": ezpu_serial,
+            "tracker_serial": tracker_serial,
+            "origin_city": body.get("origin_city"),
+            "destination_city": body.get("destination_city"),
+            "hang_datetime": hang_dt,
+            "notes": body.get("notes"),
+        }
+
+        try:
+            trip_id = db_create_trip(payload)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        self._send_json({"id": trip_id, "status": "created"}, status=201)
+
+    def _handle_close_trip(self, trip_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        try:
+            removal_dt = self._parse_dt(body.get("removal_datetime"))
+        except ValueError:
+            self._send_json({"error": "removal_datetime должен быть в формате ISO 8601"}, status=400)
+            return
+
+        location = body.get("location")
+
+        try:
+            result = db_close_trip(trip_id, removal_dt, location)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if result is None:
+            self._send_json({"error": f"Рейс {trip_id} не найден"}, status=404)
+            return
+
+        self._send_json({"id": trip_id, "status": "closed"})
 
 
 if __name__ == "__main__":
