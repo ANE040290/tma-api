@@ -248,11 +248,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   #msg { margin-top: 10px; font-size: 13px; }
   #msg.ok { color: #166534; }
   #msg.err { color: #991b1b; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab-btn { background: #e5e7eb; color: #444; border: none; padding: 10px 18px; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 14px; }
+  .tab-btn.active { background: #fff; color: #1f2937; font-weight: 600; }
+  .tab-view { display: none; }
+  .tab-view.active { display: block; }
+  .trip-status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #dbeafe; color: #1e40af; }
+  .trip-status-снят { background: #dcfce7; color: #166534; }
 </style>
 </head>
 <body>
 <header><h1>ТМА — учёт ЭЗПУ и трекеров</h1></header>
 <div class="wrap">
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-devices" onclick="switchTab('devices')">Устройства</button>
+    <button class="tab-btn" id="tab-btn-trips" onclick="switchTab('trips')">Рейсы</button>
+  </div>
+
+  <div class="tab-view active" id="tab-devices">
 
   <div class="panel">
     <div class="filters">
@@ -318,6 +332,59 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <tbody id="devices-body"></tbody>
     </table>
   </div>
+
+  </div>
+
+  <div class="tab-view" id="tab-trips">
+
+  <div class="panel">
+    <div class="filters">
+      <div class="field">
+        <label>Статус рейса</label>
+        <select id="tf-status">
+          <option value="">все</option>
+          <option value="в пути">в пути</option>
+          <option value="снят">снят</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Клиент</label>
+        <input id="tf-client" placeholder="JTI">
+      </div>
+      <button onclick="loadTrips()">Найти</button>
+      <button class="secondary" onclick="openTripForm()" style="margin-left:auto">+ Новый рейс</button>
+    </div>
+  </div>
+
+  <div class="panel" id="trip-form-panel" style="display:none">
+    <button class="close-btn" onclick="closeTripForm()">×</button>
+    <h3>Новый рейс</h3>
+    <div class="op-form">
+      <div class="field"><label>Клиент</label><input id="tr-client"></div>
+      <div class="field"><label>№ борта</label><input id="tr-board"></div>
+      <div class="field"><label>Серийный номер ЭЗПУ</label><input id="tr-ezpu"></div>
+      <div class="field"><label>Серийный номер трекера</label><input id="tr-tracker"></div>
+      <div class="field"><label>Город отправления</label><input id="tr-origin"></div>
+      <div class="field"><label>Город назначения</label><input id="tr-dest"></div>
+      <div class="field"><label>Склад</label><input id="tr-warehouse"></div>
+      <div class="full"><label>Примечания</label><input id="tr-notes" style="width:100%"></div>
+      <div class="full"><button onclick="submitTrip()">Создать рейс</button></div>
+      <div class="full" id="trip-msg"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="count" id="trip-count-label">Загрузка...</div>
+    <table>
+      <thead><tr>
+        <th>№</th><th>Клиент</th><th>ЭЗПУ</th><th>Трекер</th><th>Маршрут</th><th>Навешена</th><th>Статус</th><th></th>
+      </tr></thead>
+      <tbody id="trips-body"></tbody>
+    </table>
+  </div>
+
+  </div>
+
 
 </div>
 
@@ -445,6 +512,106 @@ async function submitOperation() {
   } else {
     msg.textContent = data.error || 'Ошибка сохранения';
     msg.className = 'err';
+  }
+}
+
+function switchTab(name) {
+  document.getElementById('tab-devices').classList.toggle('active', name === 'devices');
+  document.getElementById('tab-trips').classList.toggle('active', name === 'trips');
+  document.getElementById('tab-btn-devices').classList.toggle('active', name === 'devices');
+  document.getElementById('tab-btn-trips').classList.toggle('active', name === 'trips');
+  if (name === 'trips') loadTrips();
+}
+
+async function loadTrips() {
+  const status = document.getElementById('tf-status').value;
+  const client = document.getElementById('tf-client').value.trim();
+  document.getElementById('trip-count-label').textContent = 'Загрузка...';
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (client) params.set('client', client);
+  const r = await fetch('/trips?' + params.toString());
+  const data = await r.json();
+  const body = document.getElementById('trips-body');
+  body.innerHTML = '';
+  data.trips.forEach(t => {
+    const tr = document.createElement('tr');
+    const route = (t.origin_city || '—') + ' → ' + (t.destination_city || '—');
+    const closeBtn = t.status === 'в пути'
+      ? `<button class="secondary" onclick="closeTrip(${t.id})">Закрыть</button>`
+      : '';
+    tr.innerHTML = `
+      <td>${t.id}</td>
+      <td>${t.client || '—'}</td>
+      <td>${t.ezpu_serial || '—'}</td>
+      <td>${t.tracker_serial || '—'}</td>
+      <td>${route}</td>
+      <td>${fmtDate(t.hang_datetime)}</td>
+      <td><span class="trip-status trip-status-${t.status}">${t.status}</span></td>
+      <td>${closeBtn}</td>
+    `;
+    body.appendChild(tr);
+  });
+  document.getElementById('trip-count-label').textContent = data.count + ' рейсов';
+}
+
+function openTripForm() {
+  document.getElementById('trip-form-panel').style.display = 'block';
+  document.getElementById('trip-form-panel').scrollIntoView({behavior: 'smooth'});
+}
+function closeTripForm() { document.getElementById('trip-form-panel').style.display = 'none'; }
+
+async function submitTrip() {
+  const msg = document.getElementById('trip-msg');
+  msg.textContent = '';
+  msg.className = '';
+  const payload = {
+    client: document.getElementById('tr-client').value.trim(),
+    board_number: document.getElementById('tr-board').value.trim(),
+    ezpu_serial: document.getElementById('tr-ezpu').value.trim(),
+    tracker_serial: document.getElementById('tr-tracker').value.trim(),
+    origin_city: document.getElementById('tr-origin').value.trim(),
+    destination_city: document.getElementById('tr-dest').value.trim(),
+    warehouse: document.getElementById('tr-warehouse').value.trim(),
+    notes: document.getElementById('tr-notes').value.trim(),
+  };
+  if (!payload.ezpu_serial && !payload.tracker_serial) {
+    msg.textContent = 'Укажите серийный номер ЭЗПУ или трекера';
+    msg.className = 'err';
+    return;
+  }
+  const r = await fetch('/trips', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (r.status === 201) {
+    msg.textContent = 'Рейс создан, id ' + data.id;
+    msg.className = 'ok';
+    ['tr-client','tr-board','tr-ezpu','tr-tracker','tr-origin','tr-dest','tr-warehouse','tr-notes'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    loadTrips();
+  } else {
+    msg.textContent = data.error || 'Ошибка сохранения';
+    msg.className = 'err';
+  }
+}
+
+async function closeTrip(id) {
+  const location = prompt('Местонахождение при снятии пломбы:');
+  if (location === null) return;
+  const r = await fetch('/trips/' + id + '/close', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({location: location}),
+  });
+  if (r.status === 200) {
+    loadTrips();
+  } else {
+    const data = await r.json();
+    alert(data.error || 'Ошибка закрытия рейса');
   }
 }
 
