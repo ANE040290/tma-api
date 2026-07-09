@@ -418,7 +418,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="count" id="trip-count-label">Загрузка...</div>
     <table>
       <thead><tr>
-        <th>№</th><th>Номер борта</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Статус</th><th></th>
+        <th>№</th><th>Номер борта</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Снято</th><th>Статус</th><th></th>
       </tr></thead>
       <tbody id="trips-body"></tbody>
     </table>
@@ -653,6 +653,7 @@ async function loadTrips() {
         <td>${leg.from}</td>
         <td>${leg.to}</td>
         <td>${i === 0 ? fmtDate(t.hang_datetime) : ''}</td>
+        <td>${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '—'}</td>
         <td>${leg.toStop
           ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>'
           : '<span class="trip-status ' + statusClass(t.status) + '">' + t.status + '</span>'}</td>
@@ -1225,17 +1226,17 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number FROM trip_stops
+                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu in cur.fetchall():
+            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
                 stops_by_trip[trip_id][key].append({
                     "id": stop_id, "location": location, "status": st_status,
-                    "sequence": sequence, "zpu_number": zpu,
+                    "sequence": sequence, "zpu_number": zpu, "completed_at": completed_at,
                 })
 
         return [
