@@ -233,8 +233,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   button:hover { background: #374151; }
   button.secondary { background: #e5e7eb; color: #222; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; }
-  th { background: #f9fafb; font-weight: 600; color: #444; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #eee; }
+  th { background: #f4f5f7; font-weight: 600; color: #444; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; border-bottom: 2px solid #e2e4e8; }
+  .panel { overflow-x: auto; }
   tr.device-row { cursor: pointer; }
   tr.device-row:hover { background: #f3f4f6; }
   .status-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #e5e7eb; }
@@ -262,11 +263,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .trip-status-исполнено { background: #dcfce7; color: #166534; }
   .trip-status-снят { background: #dcfce7; color: #166534; }
   .trip-status-в-пути { background: #dbeafe; color: #1e40af; }
-  .trip-main-row { font-weight: 600; border-top: 2px solid #d1d5db; }
-  .trip-main-row td { background: #f9fafb; }
-  .trip-leg-row { font-weight: 400; color: #777; font-size: 12px; }
-  .trip-leg-row td { padding-top: 5px; padding-bottom: 5px; }
+  .trip-main-row { font-weight: 600; }
+  .trip-main-row td { background: linear-gradient(to bottom, #f3f4f6, #f8fafc); border-top: 2px solid #cbd5e1; padding-top: 12px; padding-bottom: 12px; }
+  .trip-main-row td:first-child { border-left: 3px solid #1f2937; }
+  .trip-leg-row { font-weight: 400; color: #8a8f98; font-size: 12.5px; }
+  .trip-leg-row td { padding-top: 6px; padding-bottom: 6px; border-bottom: 1px dotted #eee; }
+  .trip-leg-row td:first-child { padding-left: 20px; color: #b0b4bb; }
   .trip-leg-row .trip-status { font-size: 11px; }
+  .trip-leg-row:hover td { background: #fafafa; }
+  .btn-success { background: #16a34a; color: #fff; border: none; font-weight: 600; }
+  .btn-success:hover { background: #15803d; }
   .waypoint-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
   .waypoint-row input { flex: 1; }
   .waypoint-row button { padding: 6px 10px; }
@@ -603,66 +609,95 @@ async function loadTrips() {
       legs.push({from: '—', to: '—', fromStop: null, toStop: null});
     }
 
+    const firstLocation = combined.length ? combined[0].location : '—';
+    const lastLocation = combined.length ? combined[combined.length - 1].location : '—';
+    const dropoffs = t.dropoffs || [];
+    const allDropoffsDone = dropoffs.length > 0 && dropoffs.every(s => s.status === 'исполнено');
+    const editingDevice = editingTrips.has(t.id);
+
+    // ---------- Главная строка рейса ----------
+    const mainRow = document.createElement('tr');
+    mainRow.className = 'device-row trip-main-row';
+    mainRow.onclick = () => openTripDetail(t.id);
+
+    const mainActions = [];
+    if (editingDevice) {
+      mainActions.push(`<button onclick="event.stopPropagation(); saveDevice(${t.id})">Сохранить</button>`);
+      mainActions.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditDevice(${t.id})">Отмена</button>`);
+    } else {
+      const label = t.status === 'запланирован' ? 'Назначить устройство' : 'Изменить устройство';
+      mainActions.push(`<button class="secondary" onclick="event.stopPropagation(); startEditDevice(${t.id})">${label}</button>`);
+      if (t.status === 'в пути' && allDropoffsDone) {
+        mainActions.push(`<button class="btn-success" onclick="event.stopPropagation(); closeTrip(${t.id})">Рейс завершён</button>`);
+      } else if (t.status === 'в пути') {
+        mainActions.push(`<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть вручную</button>`);
+      }
+    }
+
+    const mainDeviceCells = editingDevice ? `
+      <td><input id="edit-ezpu-${t.id}" value="${t.ezpu_serial || ''}" style="width:100px" onclick="event.stopPropagation()"></td>
+      <td style="color:#bbb">—</td>
+      <td><input id="edit-tracker-${t.id}" value="${t.tracker_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
+      <td><input id="edit-lock-${t.id}" value="${t.lock_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
+    ` : `
+      <td>${t.ezpu_serial || '—'}</td>
+      <td style="color:#bbb">—</td>
+      <td>${t.tracker_serial || '—'}</td>
+      <td>${t.lock_serial || '—'}</td>
+    `;
+
+    mainRow.innerHTML = `
+      <td>${t.id}</td>
+      <td>${t.board_number || '—'}</td>
+      ${mainDeviceCells}
+      <td>${firstLocation}</td>
+      <td>${lastLocation}</td>
+      <td>${fmtDate(t.hang_datetime)}</td>
+      <td>${t.removal_datetime ? fmtDate(t.removal_datetime) : '—'}</td>
+      <td><span class="trip-status ${statusClass(t.status)}">${t.status}</span></td>
+      <td>${mainActions.join(' ')}</td>
+    `;
+    body.appendChild(mainRow);
+
+    // ---------- Плечи маршрута ----------
     legs.forEach((leg, i) => {
       const tr = document.createElement('tr');
-      tr.className = 'device-row ' + (i === 0 ? 'trip-main-row' : 'trip-leg-row');
+      tr.className = 'device-row trip-leg-row';
       tr.onclick = () => openTripDetail(t.id);
-      const num = i === 0 ? String(t.id) : `${t.id}.${i}`;
+      const num = `${t.id}.${i + 1}`;
       const legDone = leg.toStop && leg.toStop.status === 'исполнено';
       const legStatus = leg.toStop ? leg.toStop.status : '—';
-      const editingDevice = i === 0 && editingTrips.has(t.id);
       const zpuStopId = leg.fromStop ? leg.fromStop.id : null;
       const editingZpu = zpuStopId && editingZpuStops.has(zpuStopId);
 
-      const actionBtns = [];
-      if (editingDevice) {
-        actionBtns.push(`<button onclick="event.stopPropagation(); saveDevice(${t.id})">Сохранить</button>`);
-        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditDevice(${t.id})">Отмена</button>`);
-      } else {
-        if (i === 0) {
-          const label = t.status === 'запланирован' ? 'Назначить устройство' : 'Изменить устройство';
-          actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); startEditDevice(${t.id})">${label}</button>`);
-        }
-        if (i === 0 && t.status === 'в пути') {
-          actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть</button>`);
-        }
-        if (leg.toStop && !legDone) {
-          actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
-        }
+      const legActions = [];
+      if (leg.toStop && !legDone) {
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
       }
       if (zpuStopId && !editingZpu) {
         const zpuLabel = leg.fromStop.zpu_number ? 'Изменить № ЗПУ' : 'Назначить № ЗПУ';
-        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); startEditZpu(${zpuStopId})">${zpuLabel}</button>`);
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); startEditZpu(${zpuStopId})">${zpuLabel}</button>`);
       }
       if (editingZpu) {
-        actionBtns.push(`<button onclick="event.stopPropagation(); saveZpu(${t.id}, ${zpuStopId})">Сохранить ЗПУ</button>`);
-        actionBtns.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditZpu(${zpuStopId})">Отмена</button>`);
+        legActions.push(`<button onclick="event.stopPropagation(); saveZpu(${t.id}, ${zpuStopId})">Сохранить ЗПУ</button>`);
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditZpu(${zpuStopId})">Отмена</button>`);
       }
 
-      const deviceCells = editingDevice ? `
-        <td><input id="edit-ezpu-${t.id}" value="${t.ezpu_serial || ''}" style="width:100px" onclick="event.stopPropagation()"></td>
-        <td>${zpuCell(leg, editingZpu, zpuStopId)}</td>
-        <td><input id="edit-tracker-${t.id}" value="${t.tracker_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
-        <td><input id="edit-lock-${t.id}" value="${t.lock_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
-      ` : `
+      tr.innerHTML = `
+        <td>${num}</td>
+        <td></td>
         <td>${t.ezpu_serial || '—'}</td>
         <td>${zpuCell(leg, editingZpu, zpuStopId)}</td>
         <td>${t.tracker_serial || '—'}</td>
         <td>${t.lock_serial || '—'}</td>
-      `;
-
-      tr.innerHTML = `
-        <td>${num}</td>
-        <td style="color:#999">${t.board_number || '—'}</td>
-        ${deviceCells}
         <td>${leg.from}</td>
         <td>${leg.to}</td>
-        <td>${i === 0 ? fmtDate(t.hang_datetime) : ''}</td>
+        <td></td>
         <td>${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '—'}</td>
         <td>${leg.toStop
           ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>'
-          : '<span class="trip-status ' + statusClass(t.status) + '">' + t.status + '</span>'}</td>
-        <td>${actionBtns.join(' ')}</td>
+          : ''}</td>
+        <td>${legActions.join(' ')}</td>
       `;
       body.appendChild(tr);
     });
