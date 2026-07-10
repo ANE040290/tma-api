@@ -1879,13 +1879,15 @@ def biglock_events_for_object(native_id, limit=200, codes=None, page_size=200, m
     page = 1
     opener = _biglock_opener()
     while scanned < limit and page <= max_pages:
-        data = _biglock_search_with_opener(opener, {
+        payload = {
             "Page": page,
             "Limit": page_size,
             "OrderBy": "CreateTimeDesc",
             "MediaType": "System",
-            "Codes": codes or ["LockEvent"],
-        })
+        }
+        if codes != []:
+            payload["Codes"] = codes or ["LockEvent"]
+        data = _biglock_search_with_opener(opener, payload)
         if total_count is None:
             total_count = data.get("TotalCount")
         items = data.get("Items", [])
@@ -1932,13 +1934,15 @@ def biglock_device_sessions(ezpu_serial, limit=5000, codes=None, page_size=200, 
     page = 1
     opener = _biglock_opener()
     while scanned < limit and page <= max_pages:
-        data = _biglock_search_with_opener(opener, {
+        payload = {
             "Page": page,
             "Limit": page_size,
             "OrderBy": "CreateTimeDesc",
             "MediaType": "System",
-            "Codes": codes or ["LockEvent"],
-        })
+        }
+        if codes != []:
+            payload["Codes"] = codes or ["LockEvent"]
+        data = _biglock_search_with_opener(opener, payload)
         if total_count is None:
             total_count = data.get("TotalCount")
         items = data.get("Items", [])
@@ -2389,7 +2393,12 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 200
             codes_raw = qs.get("codes", [None])[0]
-            codes = codes_raw.split(",") if codes_raw else None
+            if codes_raw and codes_raw.upper() == "ALL":
+                codes = []
+            elif codes_raw:
+                codes = codes_raw.split(",")
+            else:
+                codes = None
             try:
                 result = biglock_events_for_object(native_id, limit=limit, codes=codes)
             except Exception as e:
@@ -2408,7 +2417,12 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 5000
             codes_raw = qs.get("codes", [None])[0]
-            codes = codes_raw.split(",") if codes_raw else None
+            if codes_raw and codes_raw.upper() == "ALL":
+                codes = []
+            elif codes_raw:
+                codes = codes_raw.split(",")
+            else:
+                codes = None
             try:
                 result = biglock_device_sessions(ezpu_serial, limit=limit, codes=codes)
             except Exception as e:
