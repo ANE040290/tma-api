@@ -297,6 +297,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="tabs">
     <button class="tab-btn active" id="tab-btn-devices" onclick="switchTab('devices')">Устройства</button>
     <button class="tab-btn" id="tab-btn-trips" onclick="switchTab('trips')">Рейсы</button>
+    <button class="tab-btn" id="tab-btn-acts" onclick="switchTab('acts')">Акты</button>
   </div>
 
   <div class="tab-view active" id="tab-devices">
@@ -449,6 +450,87 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   </div>
 
+  <div class="tab-view" id="tab-acts">
+
+  <div class="panel" id="act-form-panel">
+    <h3>Новый акт приёма-передачи</h3>
+    <div class="op-form">
+      <div class="field">
+        <label>Направление</label>
+        <select id="act-direction">
+          <option value="передача">Передача (ТМА → Заказчику)</option>
+          <option value="возврат">Возврат (Заказчик → ТМА)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Заказчик (полное наименование)</label>
+        <select id="act-counterparty-preset" onchange="onActCounterpartyPreset()">
+          <option value="">выбрать из списка...</option>
+          <option value="ТОО «ТК «Мегаполис-Казахстан»">ТОО «ТК «Мегаполис-Казахстан»</option>
+          <option value="ТОО «ТМЕ»">ТОО «ТМЕ»</option>
+          <option value="ТОО «СОП ТЖК»">ТОО «СОП ТЖК»</option>
+        </select>
+      </div>
+      <div class="field"><label>&nbsp;</label><input id="act-counterparty" placeholder="или впишите вручную"></div>
+      <div class="field"><label>Метка склада (напр. JTI)</label><input id="act-counterparty-label"></div>
+      <div class="field"><label>Дата акта</label><input id="act-date" type="date"></div>
+      <div class="field"><label>№ договора</label><input id="act-contract-number" value="07/04-2020"></div>
+      <div class="field"><label>Дата договора</label><input id="act-contract-date" type="date" value="2020-07-01"></div>
+      <div class="field"><label>Директор (Исполнитель)</label><input id="act-director" value="Архаров Н.Э."></div>
+    </div>
+
+    <h4 style="margin-top:20px">Поиск устройств для добавления в акт</h4>
+    <div class="filters">
+      <div class="field" style="flex:1">
+        <label>Серийный номер</label>
+        <input id="act-device-search" placeholder="начните вводить номер..." oninput="renderActDeviceSearch()">
+      </div>
+    </div>
+    <div id="act-device-search-results"></div>
+
+    <div class="op-form" style="margin-top:16px">
+      <div class="full">
+        <label>ЭЗПУ (серийные номера через запятую или с новой строки)</label>
+        <textarea id="act-ezpu-list" rows="2" style="width:100%"></textarea>
+      </div>
+      <div class="field"><label>Цена за ед., тенге (ЭЗПУ)</label><input id="act-ezpu-price" type="number" value="190000"></div>
+
+      <div class="full">
+        <label>Трекеры (серийные номера через запятую или с новой строки)</label>
+        <textarea id="act-tracker-list" rows="2" style="width:100%"></textarea>
+      </div>
+      <div class="field"><label>Цена за ед., тенге (трекеры)</label><input id="act-tracker-price" type="number" value="60000"></div>
+
+      <div class="full">
+        <label>Закладки (серийные номера через запятую или с новой строки)</label>
+        <textarea id="act-lock-list" rows="2" style="width:100%"></textarea>
+      </div>
+      <div class="field"><label>Цена за ед., тенге (закладки)</label><input id="act-lock-price" type="number" value="0"></div>
+    </div>
+
+    <h4 style="margin-top:20px">Прочие позиции (ЗПУ и всё, что впишете вручную)</h4>
+    <div id="act-custom-lines"></div>
+    <button class="secondary" type="button" onclick="addActCustomLine()">+ Добавить произвольную позицию</button>
+
+    <div style="margin-top:16px">
+      <button onclick="submitAct()">Создать акт</button>
+      <span id="act-msg" style="margin-left:10px"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="count" id="acts-count-label">Загрузка...</div>
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th>№ акта</th><th>Направление</th><th>Заказчик</th><th>Дата</th><th>Позиций</th><th>Создан</th><th></th>
+      </tr></thead>
+      <tbody id="acts-body"></tbody>
+    </table>
+    </div>
+  </div>
+
+  </div>
 
 </div>
 
@@ -582,9 +664,12 @@ async function submitOperation() {
 function switchTab(name) {
   document.getElementById('tab-devices').classList.toggle('active', name === 'devices');
   document.getElementById('tab-trips').classList.toggle('active', name === 'trips');
+  document.getElementById('tab-acts').classList.toggle('active', name === 'acts');
   document.getElementById('tab-btn-devices').classList.toggle('active', name === 'devices');
   document.getElementById('tab-btn-trips').classList.toggle('active', name === 'trips');
+  document.getElementById('tab-btn-acts').classList.toggle('active', name === 'acts');
   if (name === 'trips') loadTrips();
+  if (name === 'acts') { loadAllDevicesCache(); loadActs(); if (!document.getElementById('act-date').value) document.getElementById('act-date').value = new Date().toISOString().slice(0,10); }
 }
 
 let editingTrips = new Set();
@@ -960,6 +1045,148 @@ async function saveDevice(id) {
     const data = await r.json();
     alert(data.error || 'Ошибка сохранения устройства');
   }
+}
+
+let allDevicesCache = [];
+let actCustomLineCounter = 0;
+
+function onActCounterpartyPreset() {
+  const preset = document.getElementById('act-counterparty-preset').value;
+  if (preset) document.getElementById('act-counterparty').value = preset;
+}
+
+async function loadAllDevicesCache() {
+  if (allDevicesCache.length) return;
+  const r = await fetch('/devices?limit=2000');
+  const data = await r.json();
+  allDevicesCache = data.devices;
+}
+
+function renderActDeviceSearch() {
+  const q = document.getElementById('act-device-search').value.trim().toLowerCase();
+  const box = document.getElementById('act-device-search-results');
+  if (!q) { box.innerHTML = ''; return; }
+  const matches = allDevicesCache.filter(d => d.serial_number.toLowerCase().includes(q)).slice(0, 8);
+  if (!matches.length) { box.innerHTML = '<div style="padding:6px 0; color:#888; font-size:13px">Ничего не найдено</div>'; return; }
+  box.innerHTML = matches.map(d => `
+    <div class="stop-line" style="justify-content:space-between; padding:4px 0">
+      <span>${d.serial_number} <span style="color:#888; font-size:12px">(${d.device_type === 'ezpu' ? 'ЭЗПУ' : d.device_type === 'tracker' ? 'трекер' : 'закладка'}, ${d.status})</span></span>
+      <button class="secondary" type="button" onclick="addDeviceToAct('${d.serial_number}', '${d.device_type}')">+ Добавить</button>
+    </div>
+  `).join('');
+}
+
+function addDeviceToAct(serial, deviceType) {
+  const fieldId = deviceType === 'ezpu' ? 'act-ezpu-list' : deviceType === 'tracker' ? 'act-tracker-list' : 'act-lock-list';
+  const el = document.getElementById(fieldId);
+  const current = el.value.split(/[\n,]+/).map(s => s.trim()).filter(s => s);
+  if (!current.includes(serial)) current.push(serial);
+  el.value = current.join(', ');
+  document.getElementById('act-device-search').value = '';
+  document.getElementById('act-device-search-results').innerHTML = '';
+}
+
+function addActCustomLine(name, qty, price) {
+  actCustomLineCounter++;
+  const id = 'act-custom-' + actCustomLineCounter;
+  const div = document.createElement('div');
+  div.className = 'waypoint-row';
+  div.id = id;
+  div.innerHTML = `
+    <input placeholder="Наименование (напр. ЗПУ одноразовые)" id="${id}-name" value="${name || ''}" style="flex:2">
+    <input placeholder="Кол-во" type="number" id="${id}-qty" value="${qty || 1}" style="width:70px">
+    <input placeholder="Цена за ед." type="number" id="${id}-price" value="${price || ''}" style="width:100px">
+    <button class="secondary" type="button" onclick="document.getElementById('${id}').remove()">×</button>
+  `;
+  document.getElementById('act-custom-lines').appendChild(div);
+}
+
+function parseSerialsField(id) {
+  return document.getElementById(id).value.split(/[\n,]+/).map(s => s.trim()).filter(s => s);
+}
+
+async function submitAct() {
+  const msg = document.getElementById('act-msg');
+  msg.textContent = '';
+  msg.className = '';
+
+  const counterparty = document.getElementById('act-counterparty').value.trim();
+  const actDate = document.getElementById('act-date').value;
+  if (!counterparty) { msg.textContent = 'Укажите заказчика'; msg.className = 'err'; return; }
+  if (!actDate) { msg.textContent = 'Укажите дату акта'; msg.className = 'err'; return; }
+
+  const lines = [];
+  const ezpuSerials = parseSerialsField('act-ezpu-list');
+  const ezpuPrice = parseFloat(document.getElementById('act-ezpu-price').value) || null;
+  ezpuSerials.forEach(s => lines.push({item_name: 'ЭЗПУ Сириус', serials: [s], qty: 1, unit_price: ezpuPrice, device_type: 'ezpu'}));
+
+  const trackerSerials = parseSerialsField('act-tracker-list');
+  const trackerPrice = parseFloat(document.getElementById('act-tracker-price').value) || null;
+  if (trackerSerials.length) lines.push({item_name: 'Concox AT4', serials: trackerSerials, qty: trackerSerials.length, unit_price: trackerPrice, device_type: 'tracker'});
+
+  const lockSerials = parseSerialsField('act-lock-list');
+  const lockPrice = parseFloat(document.getElementById('act-lock-price').value) || null;
+  if (lockSerials.length) lines.push({item_name: 'Трекер-закладка', serials: lockSerials, qty: lockSerials.length, unit_price: lockPrice, device_type: 'lock'});
+
+  document.querySelectorAll('#act-custom-lines .waypoint-row').forEach(row => {
+    const id = row.id;
+    const name = document.getElementById(id + '-name').value.trim();
+    const qty = parseInt(document.getElementById(id + '-qty').value) || 0;
+    const price = parseFloat(document.getElementById(id + '-price').value) || null;
+    if (name && qty > 0) lines.push({item_name: name, serials: [], qty: qty, unit_price: price});
+  });
+
+  if (!lines.length) { msg.textContent = 'Добавьте хотя бы одну позицию'; msg.className = 'err'; return; }
+
+  const payload = {
+    direction: document.getElementById('act-direction').value,
+    counterparty: counterparty,
+    counterparty_label: document.getElementById('act-counterparty-label').value.trim(),
+    act_date: actDate,
+    contract_number: document.getElementById('act-contract-number').value.trim(),
+    contract_date: document.getElementById('act-contract-date').value,
+    director_name: document.getElementById('act-director').value.trim(),
+    lines: lines,
+  };
+
+  const r = await fetch('/acts', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (r.status === 201) {
+    msg.textContent = 'Акт № ' + data.act_number + ' создан';
+    msg.className = 'ok';
+    ['act-ezpu-list','act-tracker-list','act-lock-list'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('act-custom-lines').innerHTML = '';
+    loadActs();
+  } else {
+    msg.textContent = data.error || 'Ошибка создания акта';
+    msg.className = 'err';
+  }
+}
+
+async function loadActs() {
+  document.getElementById('acts-count-label').textContent = 'Загрузка...';
+  const r = await fetch('/acts');
+  const data = await r.json();
+  const body = document.getElementById('acts-body');
+  body.innerHTML = '';
+  data.acts.forEach(a => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${a.act_number}</td>
+      <td>${a.direction}</td>
+      <td>${a.counterparty || '—'}${a.counterparty_label ? ' (' + a.counterparty_label + ')' : ''}</td>
+      <td>${a.act_date || '—'}</td>
+      <td>${a.lines_count}</td>
+      <td>${fmtDate(a.generated_at)}</td>
+      <td><a href="/acts/${a.id}/download"><button class="secondary">Скачать .docx</button></a></td>
+    `;
+    body.appendChild(tr);
+  });
+  document.getElementById('acts-count-label').textContent = data.count + ' актов';
 }
 
 loadDevices();
@@ -1361,55 +1588,75 @@ def db_close_trip(trip_id, removal_dt, location):
 
 # ---------- Акты приёма-передачи ----------
 
-def db_create_act(act_type, from_party_name, to_party_name, period_from, period_to):
+_MONTHS_RU = {
+    1: "Января", 2: "Февраля", 3: "Марта", 4: "Апреля", 5: "Мая", 6: "Июня",
+    7: "Июля", 8: "Августа", 9: "Сентября", 10: "Октября", 11: "Ноября", 12: "Декабря",
+}
+
+_ITEM_NAME_BY_DEVICE_TYPE = {
+    "ezpu": "ЭЗПУ Сириус",
+    "tracker": "Concox AT4",
+    "lock": "Трекер-закладка",
+}
+
+
+def db_create_act(payload):
     conn = get_connection()
     try:
         cur = conn.cursor()
-        from_id = _get_or_create_party(cur, from_party_name)
-        to_id = _get_or_create_party(cur, to_party_name)
+        counterparty_id = _get_or_create_party(cur, payload["counterparty"])
+
+        cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM acts")
+        act_number = str(cur.fetchone()[0])
 
         cur.execute(
             """
-            SELECT COUNT(*) FROM acts
-            WHERE from_party_id = %s AND to_party_id = %s AND period_from = %s AND act_type = %s
-            """,
-            (from_id, to_id, period_from, act_type),
-        )
-        seq = cur.fetchone()[0] + 1
-        act_number = f"{period_from.strftime('%Y%m%d')}-{seq}"
-
-        cur.execute(
-            """
-            INSERT INTO acts (act_type, from_party_id, to_party_id, period_from, period_to, act_number, generated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, now())
+            INSERT INTO acts
+                (act_type, direction, counterparty_id, counterparty_label,
+                 contract_number, contract_date, act_date, act_number, director_name, generated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             RETURNING id
             """,
-            (act_type, from_id, to_id, period_from, period_to, act_number),
+            (payload["direction"], payload["direction"], counterparty_id, payload["counterparty_label"],
+             payload["contract_number"], payload["contract_date"], payload["act_date"],
+             act_number, payload["director_name"]),
         )
         act_id = cur.fetchone()[0]
 
-        cur.execute(
-            """
-            SELECT o.id, d.serial_number, d.device_type, o.operation_dt, o.location, o.document_ref
-            FROM operations o
-            JOIN devices d ON d.id = o.device_id
-            WHERE o.operation_type = %s AND o.from_party_id = %s AND o.to_party_id = %s
-              AND o.operation_dt >= %s AND o.operation_dt < %s
-            ORDER BY o.operation_dt
-            """,
-            (act_type, from_id, to_id, period_from, period_to),
-        )
-        rows = cur.fetchall()
-        for op_id, serial, dtype, op_dt, location, doc_ref in rows:
-            label = "ЭЗПУ" if dtype == "ezpu" else ("трекер" if dtype == "tracker" else "закладка")
-            desc = f"{label} {serial}, {op_dt.strftime('%d.%m.%Y')}, {location or ''}"
+        for line in payload["lines"]:
             cur.execute(
-                "INSERT INTO act_lines (act_id, operation_id, description) VALUES (%s, %s, %s)",
-                (act_id, op_id, desc),
+                """
+                INSERT INTO act_lines (act_id, item_name, serials, unit, qty, unit_price)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (act_id, line["item_name"], ", ".join(line["serials"]) if line["serials"] else None,
+                 line.get("unit", "шт"), line["qty"], line.get("unit_price")),
             )
 
+        # если позиция ссылается на реально отслеживаемые устройства (ЭЗПУ/трекер/закладка),
+        # заодно фиксируем операцию передачи/возврата в журнале
+        from_name, to_name = ("ТМА", payload["counterparty"]) if payload["direction"] == "передача" \
+            else (payload["counterparty"], "ТМА")
+        from_id = _get_or_create_party(cur, from_name)
+        to_id = _get_or_create_party(cur, to_name)
+        for line in payload["lines"]:
+            if line.get("device_type") in ("ezpu", "tracker", "lock"):
+                for serial in line["serials"]:
+                    device_id = _get_or_create_device(cur, serial, line["device_type"])
+                    cur.execute(
+                        """
+                        INSERT INTO operations (device_id, operation_type, from_party_id, to_party_id, operation_dt, document_ref)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (device_id, payload["direction"], from_id, to_id, payload["act_date"], f"Акт №{act_number}"),
+                    )
+                    cur.execute(
+                        "UPDATE devices SET current_holder_id = %s, last_operation_at = %s, updated_at = now() WHERE id = %s",
+                        (to_id, payload["act_date"], device_id),
+                    )
+
         conn.commit()
-        return act_id, len(rows)
+        return act_id, act_number
     except Exception:
         conn.rollback()
         raise
@@ -1423,11 +1670,10 @@ def db_get_act(act_id):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT a.id, a.act_type, fp.name, tp.name, a.period_from, a.period_to,
-                   a.act_number, a.generated_at
+            SELECT a.id, a.direction, cp.name, a.counterparty_label, a.contract_number,
+                   a.contract_date, a.act_date, a.act_number, a.director_name, a.generated_at
             FROM acts a
-            LEFT JOIN parties fp ON fp.id = a.from_party_id
-            LEFT JOIN parties tp ON tp.id = a.to_party_id
+            LEFT JOIN parties cp ON cp.id = a.counterparty_id
             WHERE a.id = %s
             """,
             (act_id,),
@@ -1435,12 +1681,18 @@ def db_get_act(act_id):
         r = cur.fetchone()
         if not r:
             return None
-        cur.execute("SELECT description FROM act_lines WHERE act_id = %s ORDER BY id", (act_id,))
-        lines = [row[0] for row in cur.fetchall()]
+        cur.execute(
+            "SELECT item_name, serials, unit, qty, unit_price FROM act_lines WHERE act_id = %s ORDER BY id",
+            (act_id,),
+        )
+        lines = [
+            {"item_name": x[0], "serials": x[1], "unit": x[2], "qty": x[3], "unit_price": x[4]}
+            for x in cur.fetchall()
+        ]
         return {
-            "id": r[0], "act_type": r[1], "from_party": r[2], "to_party": r[3],
-            "period_from": r[4], "period_to": r[5], "act_number": r[6],
-            "generated_at": r[7], "lines": lines,
+            "id": r[0], "direction": r[1], "counterparty": r[2], "counterparty_label": r[3],
+            "contract_number": r[4], "contract_date": r[5], "act_date": r[6],
+            "act_number": r[7], "director_name": r[8], "generated_at": r[9], "lines": lines,
         }
     finally:
         conn.close()
@@ -1452,13 +1704,12 @@ def db_list_acts(limit=100):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT a.id, a.act_type, fp.name, tp.name, a.period_from, a.period_to,
-                   a.act_number, a.generated_at, COUNT(al.id)
+            SELECT a.id, a.direction, cp.name, a.counterparty_label, a.act_date, a.act_number, a.generated_at,
+                   COUNT(al.id)
             FROM acts a
-            LEFT JOIN parties fp ON fp.id = a.from_party_id
-            LEFT JOIN parties tp ON tp.id = a.to_party_id
+            LEFT JOIN parties cp ON cp.id = a.counterparty_id
             LEFT JOIN act_lines al ON al.act_id = a.id
-            GROUP BY a.id, fp.name, tp.name
+            GROUP BY a.id, cp.name
             ORDER BY a.generated_at DESC
             LIMIT %s
             """,
@@ -1466,9 +1717,8 @@ def db_list_acts(limit=100):
         )
         return [
             {
-                "id": r[0], "act_type": r[1], "from_party": r[2], "to_party": r[3],
-                "period_from": r[4], "period_to": r[5], "act_number": r[6],
-                "generated_at": r[7], "lines_count": r[8],
+                "id": r[0], "direction": r[1], "counterparty": r[2], "counterparty_label": r[3],
+                "act_date": r[4], "act_number": r[5], "generated_at": r[6], "lines_count": r[7],
             }
             for r in cur.fetchall()
         ]
@@ -1503,35 +1753,43 @@ _DOCX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:styles>"""
 
 
-def _docx_p(text, bold=False, center=False, size=22):
-    align = '<w:jc w:val="center"/>' if center else ""
+def _docx_p(text, bold=False, center=False, italic=False, size=22, justify=False):
+    align = ""
+    if center:
+        align = '<w:jc w:val="center"/>'
+    elif justify:
+        align = '<w:jc w:val="both"/>'
     b = "<w:b/>" if bold else ""
+    i = "<w:i/>" if italic else ""
+    rpr = f'{b}{i}<w:sz w:val="{size}"/>'
     return (
-        f'<w:p><w:pPr>{align}<w:rPr>{b}<w:sz w:val="{size}"/></w:rPr></w:pPr>'
-        f'<w:r><w:rPr>{b}<w:sz w:val="{size}"/></w:rPr><w:t xml:space="preserve">{xml_escape(text)}</w:t></w:r></w:p>'
+        f'<w:p><w:pPr>{align}<w:rPr>{rpr}</w:rPr></w:pPr>'
+        f'<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space="preserve">{xml_escape(text)}</w:t></w:r></w:p>'
     )
 
 
-def _docx_table(headers, rows):
-    def cell(text, bold=False):
+def _docx_table(headers, rows, col_widths=None):
+    def cell(text, bold=False, width=None):
         b = "<w:b/>" if bold else ""
+        w = f'<w:tcW w:w="{width}" w:type="dxa"/>' if width else '<w:tcW w:w="0" w:type="auto"/>'
         return (
-            f'<w:tc><w:tcPr><w:tcBorders>'
+            f'<w:tc><w:tcPr>{w}<w:tcBorders>'
             f'<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>'
             f'<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>'
             f'</w:tcBorders></w:tcPr>'
-            f'<w:p><w:r><w:rPr>{b}<w:sz w:val="20"/></w:rPr>'
+            f'<w:p><w:r><w:rPr>{b}<w:sz w:val="18"/></w:rPr>'
             f'<w:t xml:space="preserve">{xml_escape(str(text))}</w:t></w:r></w:p></w:tc>'
         )
 
     def row(cells, bold=False):
-        return "<w:tr>" + "".join(cell(c, bold) for c in cells) + "</w:tr>"
+        tds = "".join(cell(c, bold, col_widths[i] if col_widths else None) for i, c in enumerate(cells))
+        return f"<w:tr>{tds}</w:tr>"
 
-    tbl = '<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' \
-          '<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>' \
-          '<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>' \
-          '<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>' \
-          '</w:tblBorders></w:tblPr>'
+    tbl = ('<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
+           '<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>'
+           '<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>'
+           '<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>'
+           '</w:tblBorders></w:tblPr>')
     tbl += row(headers, bold=True)
     for r in rows:
         tbl += row(r)
@@ -1539,30 +1797,117 @@ def _docx_table(headers, rows):
     return tbl
 
 
+def _fmt_ru_date(d):
+    return f"«{d.day}» {_MONTHS_RU[d.month]} {d.year} г."
+
+
+def _fmt_money(amount):
+    return f"{amount:,.0f}".replace(",", " ")
+
+
 def generate_act_docx(act):
-    body_parts = []
-    body_parts.append(_docx_p("АКТ ПРИЁМА-ПЕРЕДАЧИ", bold=True, center=True, size=28))
-    body_parts.append(_docx_p(f"№ {act['act_number']}", bold=True, center=True, size=24))
-    body_parts.append(_docx_p(""))
-    period = f"{act['period_from'].strftime('%d.%m.%Y')} — {act['period_to'].strftime('%d.%m.%Y')}"
-    body_parts.append(_docx_p(f"Период: {period}"))
-    body_parts.append(_docx_p(f"Тип операции: {act['act_type']}"))
-    body_parts.append(_docx_p(f"Передающая сторона: {act['from_party'] or '—'}"))
-    body_parts.append(_docx_p(f"Принимающая сторона: {act['to_party'] or '—'}"))
-    body_parts.append(_docx_p(""))
+    direction = act["direction"]
+    counterparty = act["counterparty"] or "—"
+    label = f" ({act['counterparty_label']})" if act["counterparty_label"] else ""
 
-    if act["lines"]:
-        headers = ["№", "Устройство / дата / место"]
-        rows = [[i + 1, line] for i, line in enumerate(act["lines"])]
-        body_parts.append(_docx_table(headers, rows))
+    if direction == "передача":
+        verb_block = 'Исполнитель в соответствии с настоящим актом передал Заказчику, а Заказчик принял следующее оборудование:'
     else:
-        body_parts.append(_docx_p("За указанный период операций не найдено."))
+        verb_block = 'Заказчик в соответствии с настоящим актом возвратил Исполнителю, а Исполнитель принял следующее оборудование:'
 
+    body_parts = []
+
+    header_tbl = (
+        '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/>'
+        '<w:tblBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/>'
+        '<w:insideH w:val="none"/><w:insideV w:val="none"/></w:tblBorders></w:tblPr>'
+        '<w:tr><w:tc><w:tcPr><w:tcW w:w="5000" w:type="dxa"/></w:tcPr><w:p/></w:tc>'
+        '<w:tc><w:tcPr><w:tcW w:w="3500" w:type="dxa"/></w:tcPr>'
+        '<w:p><w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="20"/></w:rPr>'
+        '<w:t xml:space="preserve">Приложение № 3</w:t></w:r></w:p>'
+        f'<w:p><w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="20"/></w:rPr>'
+        f'<w:t xml:space="preserve">к Договору {xml_escape(act["contract_number"])}</w:t></w:r></w:p>'
+        f'<w:p><w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="20"/></w:rPr>'
+        f'<w:t xml:space="preserve">от {act["contract_date"].strftime("%d.%m.%Y")} г.</w:t></w:r></w:p>'
+        '</w:tc></w:tr></w:tbl>'
+    )
+    body_parts.append(header_tbl)
+    body_parts.append(_docx_p(""))
+
+    body_parts.append(_docx_p("АКТ ПРИЕМА-ПЕРЕДАЧИ ОБОРУДОВАНИЯ", bold=True, center=True, size=26))
+    body_parts.append(_docx_p(f"№{act['act_number']} {_fmt_ru_date(act['act_date'])}", bold=True, center=True, size=24))
+    body_parts.append(_docx_p(""))
+
+    preamble = (
+        f'ТОО «Транс Мониторинг Автоматизация», в лице Директора {act["director_name"]} '
+        f'действующего на основании Устава, именуемое в дальнейшем Исполнитель, с одной стороны, '
+        f'и {counterparty}{label}, именуемое в дальнейшем Заказчик, с другой стороны, '
+        f'в дальнейшем совместно именуемые Стороны, а по отдельности — Сторона, подписали настоящий акт '
+        f'приема-передачи Оборудования, согласно договора от {act["contract_date"].strftime("%d.%m.%Y")} '
+        f'№ {act["contract_number"]}, заключенному между Сторонами, о нижеследующем:'
+    )
+    body_parts.append(_docx_p(preamble, justify=True))
+    body_parts.append(_docx_p(""))
+    body_parts.append(_docx_p("1. " + verb_block, justify=True))
+    body_parts.append(_docx_p(""))
+
+    headers = ["№ п/п", "Наименование оборудования", "Заводской (серийный) номер", "Ед. изм.", "Кол-во", "Стоимость, тенге."]
+    rows = []
+    total = 0
+    for i, line in enumerate(act["lines"], start=1):
+        qty = line["qty"] or 0
+        price = float(line["unit_price"]) if line["unit_price"] is not None else 0
+        total += qty * price
+        rows.append([
+            i, line["item_name"], line["serials"] or "—", line["unit"] or "шт", qty,
+            _fmt_money(price) if line["unit_price"] is not None else "—",
+        ])
+    body_parts.append(_docx_table(headers, rows))
+    body_parts.append(_docx_p(""))
+
+    if total > 0:
+        body_parts.append(_docx_p(
+            f"Общая стоимость Оборудования, {'передаваемого Исполнителем' if direction == 'передача' else 'возвращаемого Заказчиком'}, составляет:"
+        ))
+        body_parts.append(_docx_p(f"{_fmt_money(total)} тенге", bold=False))
+        body_parts.append(_docx_p(""))
+
+    body_parts.append(_docx_p(
+        "2. Претензий по внешнему виду, целостности и комплектации устройств, у Заказчика к Исполнителю "
+        "по передаваемому Оборудованию не имеется.", justify=True
+    ))
+    body_parts.append(_docx_p(
+        "3. Подписав настоящий акт, Стороны подтверждают, что обязательства Сторон по приему-передаче "
+        "Оборудования по Договору исполнены надлежащим образом.", justify=True
+    ))
+    body_parts.append(_docx_p(
+        "4. Настоящий акт подписан в 2 (двух) подлинных экземплярах на русском языке по одному "
+        "для каждой из Сторон.", justify=True
+    ))
     body_parts.append(_docx_p(""))
     body_parts.append(_docx_p(""))
-    body_parts.append(_docx_p(f"Сдал: _________________ ({act['from_party'] or ''})"))
-    body_parts.append(_docx_p(""))
-    body_parts.append(_docx_p(f"Принял: _________________ ({act['to_party'] or ''})"))
+
+    sig_tbl = (
+        '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/>'
+        '<w:tblBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/>'
+        '<w:insideH w:val="none"/><w:insideV w:val="none"/></w:tblBorders></w:tblPr>'
+        '<w:tr>'
+        '<w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>'
+        '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Исполнитель</w:t></w:r></w:p>'
+        '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Директор</w:t></w:r></w:p>'
+        '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>ТОО «Транс Мониторинг Автоматизация»</w:t></w:r></w:p>'
+        '<w:p/><w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">_____________________ </w:t></w:r>'
+        f'<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{xml_escape(act["director_name"])}</w:t></w:r></w:p>'
+        '</w:tc>'
+        '<w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>'
+        '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Заказчик</w:t></w:r></w:p>'
+        f'<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{xml_escape(counterparty)}{xml_escape(label)}</w:t></w:r></w:p>'
+        '<w:p/><w:p/>'
+        '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>_____________________</w:t></w:r></w:p>'
+        '</w:tc>'
+        '</w:tr></w:tbl>'
+    )
+    body_parts.append(sig_tbl)
 
     sect_pr = (
         '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
@@ -2028,34 +2373,87 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
             return
 
-        act_type = (body.get("act_type") or "").strip()
-        from_party = (body.get("from_party") or "").strip()
-        to_party = (body.get("to_party") or "").strip()
+        direction = (body.get("direction") or "").strip()
+        counterparty = (body.get("counterparty") or "").strip()
+        lines_in = body.get("lines")
 
-        if act_type not in ("передача", "возврат"):
-            self._send_json({"error": "act_type должен быть 'передача' или 'возврат'"}, status=400)
+        if direction not in ("передача", "возврат"):
+            self._send_json({"error": "direction должен быть 'передача' или 'возврат'"}, status=400)
             return
-        if not from_party or not to_party:
-            self._send_json({"error": "Укажите from_party и to_party"}, status=400)
+        if not counterparty:
+            self._send_json({"error": "Укажите counterparty (заказчика)"}, status=400)
+            return
+        if not isinstance(lines_in, list) or not lines_in:
+            self._send_json({"error": "Укажите хотя бы одну позицию в lines"}, status=400)
             return
 
         try:
-            period_from = datetime.datetime.strptime(body.get("period_from"), "%Y-%m-%d").date()
-            period_to = datetime.datetime.strptime(body.get("period_to"), "%Y-%m-%d").date()
+            act_date = datetime.datetime.strptime(body.get("act_date"), "%Y-%m-%d").date()
         except (ValueError, TypeError):
-            self._send_json({"error": "period_from/period_to должны быть в формате ГГГГ-ММ-ДД"}, status=400)
+            self._send_json({"error": "act_date должен быть в формате ГГГГ-ММ-ДД"}, status=400)
             return
 
-        # период включительно: конец дня period_to
-        period_to_exclusive = period_to + datetime.timedelta(days=1)
+        contract_date_raw = body.get("contract_date") or "2020-07-01"
+        try:
+            contract_date = datetime.datetime.strptime(contract_date_raw, "%Y-%m-%d").date()
+        except ValueError:
+            self._send_json({"error": "contract_date должен быть в формате ГГГГ-ММ-ДД"}, status=400)
+            return
+
+        lines = []
+        for i, ln in enumerate(lines_in):
+            item_name = (ln.get("item_name") or "").strip()
+            if not item_name:
+                self._send_json({"error": f"Позиция {i + 1}: укажите item_name"}, status=400)
+                return
+            serials = ln.get("serials") or []
+            if not isinstance(serials, list):
+                self._send_json({"error": f"Позиция {i + 1}: serials должен быть списком"}, status=400)
+                return
+            serials = [s.strip() for s in serials if (s or "").strip()]
+            qty = ln.get("qty")
+            if qty is None:
+                qty = len(serials) if serials else 0
+            try:
+                qty = int(qty)
+            except (ValueError, TypeError):
+                self._send_json({"error": f"Позиция {i + 1}: qty должен быть числом"}, status=400)
+                return
+            unit_price = ln.get("unit_price")
+            if unit_price is not None:
+                try:
+                    unit_price = float(unit_price)
+                except (ValueError, TypeError):
+                    self._send_json({"error": f"Позиция {i + 1}: unit_price должен быть числом"}, status=400)
+                    return
+            device_type = ln.get("device_type")
+            if device_type not in ("ezpu", "tracker", "lock", None):
+                self._send_json({"error": f"Позиция {i + 1}: device_type должен быть ezpu/tracker/lock"}, status=400)
+                return
+
+            lines.append({
+                "item_name": item_name, "serials": serials, "unit": ln.get("unit") or "шт",
+                "qty": qty, "unit_price": unit_price, "device_type": device_type,
+            })
+
+        payload = {
+            "direction": direction,
+            "counterparty": counterparty,
+            "counterparty_label": (body.get("counterparty_label") or "").strip() or None,
+            "contract_number": (body.get("contract_number") or "").strip() or "07/04-2020",
+            "contract_date": contract_date,
+            "act_date": act_date,
+            "director_name": (body.get("director_name") or "").strip() or "Архаров Н.Э.",
+            "lines": lines,
+        }
 
         try:
-            act_id, count = db_create_act(act_type, from_party, to_party, period_from, period_to_exclusive)
+            act_id, act_number = db_create_act(payload)
         except Exception as e:
             self._send_json({"error": str(e)}, status=500)
             return
 
-        self._send_json({"id": act_id, "operations_count": count, "status": "created"}, status=201)
+        self._send_json({"id": act_id, "act_number": act_number, "status": "created"}, status=201)
 
 
 if __name__ == "__main__":
