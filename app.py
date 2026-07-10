@@ -1919,6 +1919,75 @@ def biglock_events_for_object(native_id, limit=200, codes=None, page_size=200, m
     }
 
 
+def biglock_device_sessions(ezpu_serial, limit=5000, codes=None, page_size=200, max_pages=25):
+    """Ищет все события по конкретному серийнику ЭЗПУ (не по борту) и
+    группирует их в 'сессии' - непрерывные периоды, когда устройство
+    числилось под одним и тем же номером борта. Первое событие сессии
+    ~= навешивание, последнее событие перед сменой борта (или до
+    текущего момента) ~= снятие. Это обходной способ, пока точный
+    DeviceEvent.Type для навешивания/снятия не опознан вручную."""
+    matched = []
+    total_count = None
+    scanned = 0
+    page = 1
+    opener = _biglock_opener()
+    while scanned < limit and page <= max_pages:
+        data = _biglock_search_with_opener(opener, {
+            "Page": page,
+            "Limit": page_size,
+            "OrderBy": "CreateTimeDesc",
+            "MediaType": "System",
+            "Codes": codes or ["LockEvent"],
+        })
+        if total_count is None:
+            total_count = data.get("TotalCount")
+        items = data.get("Items", [])
+        if not items:
+            break
+        for item in items:
+            params = item.get("Parameters", {})
+            electric = params.get("ElectricDevice") or {}
+            if electric.get("CaseId") != ezpu_serial:
+                continue
+            guarded = params.get("GuardedObject", {})
+            device_event = params.get("DeviceEvent", {})
+            matched.append({
+                "create_time": item.get("CreateTime"),
+                "event_type": device_event.get("Type"),
+                "native_id": guarded.get("NativeId"),
+                "zpu_number": (params.get("MechanicalDevice") or {}).get("CaseId"),
+            })
+        scanned += len(items)
+        page += 1
+        if len(items) < page_size:
+            break
+
+    # события шли по убыванию времени (CreateTimeDesc) - развернём по возрастанию для группировки
+    matched.sort(key=lambda e: e["create_time"])
+
+    sessions = []
+    current = None
+    for e in matched:
+        if current is None or current["native_id"] != e["native_id"]:
+            if current:
+                sessions.append(current)
+            current = {
+                "native_id": e["native_id"], "zpu_number": e["zpu_number"],
+                "start_time": e["create_time"], "end_time": e["create_time"],
+                "event_count": 1,
+            }
+        else:
+            current["end_time"] = e["create_time"]
+            current["event_count"] += 1
+    if current:
+        sessions.append(current)
+
+    return {
+        "ezpu_serial": ezpu_serial, "total_count": total_count, "scanned": scanned,
+        "pages_fetched": page - 1, "matched_events": len(matched), "sessions": sessions,
+    }
+
+
 # ---------- Отчёт по ЭЗПУ для выставления счёта (расчёт суток) ----------
 
 DEFAULT_EZPU_RATE = 4060
@@ -2323,6 +2392,25 @@ class Handler(BaseHTTPRequestHandler):
             codes = codes_raw.split(",") if codes_raw else None
             try:
                 result = biglock_events_for_object(native_id, limit=limit, codes=codes)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(result)
+            return
+
+        if path == "/biglock/sessions":
+            ezpu_serial = qs.get("ezpu_serial", [None])[0]
+            if not ezpu_serial:
+                self._send_json({"error": "Укажите ezpu_serial"}, status=400)
+                return
+            try:
+                limit = int(qs.get("limit", ["5000"])[0])
+            except ValueError:
+                limit = 5000
+            codes_raw = qs.get("codes", [None])[0]
+            codes = codes_raw.split(",") if codes_raw else None
+            try:
+                result = biglock_device_sessions(ezpu_serial, limit=limit, codes=codes)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
