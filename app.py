@@ -20,6 +20,9 @@ import os
 import re
 import json
 import datetime
+import zipfile
+import io
+from xml.sax.saxutils import escape as xml_escape
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -35,6 +38,8 @@ TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
 TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
 TRIP_STOP_ZPU_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/zpu$")
+ACT_RE = re.compile(r"^/acts/(\d+)$")
+ACT_DOWNLOAD_RE = re.compile(r"^/acts/(\d+)/download$")
 
 
 def get_connection():
@@ -1352,6 +1357,234 @@ def db_close_trip(trip_id, removal_dt, location):
 
 
 
+
+
+# ---------- Акты приёма-передачи ----------
+
+def db_create_act(act_type, from_party_name, to_party_name, period_from, period_to):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        from_id = _get_or_create_party(cur, from_party_name)
+        to_id = _get_or_create_party(cur, to_party_name)
+
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM acts
+            WHERE from_party_id = %s AND to_party_id = %s AND period_from = %s AND act_type = %s
+            """,
+            (from_id, to_id, period_from, act_type),
+        )
+        seq = cur.fetchone()[0] + 1
+        act_number = f"{period_from.strftime('%Y%m%d')}-{seq}"
+
+        cur.execute(
+            """
+            INSERT INTO acts (act_type, from_party_id, to_party_id, period_from, period_to, act_number, generated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, now())
+            RETURNING id
+            """,
+            (act_type, from_id, to_id, period_from, period_to, act_number),
+        )
+        act_id = cur.fetchone()[0]
+
+        cur.execute(
+            """
+            SELECT o.id, d.serial_number, d.device_type, o.operation_dt, o.location, o.document_ref
+            FROM operations o
+            JOIN devices d ON d.id = o.device_id
+            WHERE o.operation_type = %s AND o.from_party_id = %s AND o.to_party_id = %s
+              AND o.operation_dt >= %s AND o.operation_dt < %s
+            ORDER BY o.operation_dt
+            """,
+            (act_type, from_id, to_id, period_from, period_to),
+        )
+        rows = cur.fetchall()
+        for op_id, serial, dtype, op_dt, location, doc_ref in rows:
+            label = "ЭЗПУ" if dtype == "ezpu" else ("трекер" if dtype == "tracker" else "закладка")
+            desc = f"{label} {serial}, {op_dt.strftime('%d.%m.%Y')}, {location or ''}"
+            cur.execute(
+                "INSERT INTO act_lines (act_id, operation_id, description) VALUES (%s, %s, %s)",
+                (act_id, op_id, desc),
+            )
+
+        conn.commit()
+        return act_id, len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_get_act(act_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT a.id, a.act_type, fp.name, tp.name, a.period_from, a.period_to,
+                   a.act_number, a.generated_at
+            FROM acts a
+            LEFT JOIN parties fp ON fp.id = a.from_party_id
+            LEFT JOIN parties tp ON tp.id = a.to_party_id
+            WHERE a.id = %s
+            """,
+            (act_id,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return None
+        cur.execute("SELECT description FROM act_lines WHERE act_id = %s ORDER BY id", (act_id,))
+        lines = [row[0] for row in cur.fetchall()]
+        return {
+            "id": r[0], "act_type": r[1], "from_party": r[2], "to_party": r[3],
+            "period_from": r[4], "period_to": r[5], "act_number": r[6],
+            "generated_at": r[7], "lines": lines,
+        }
+    finally:
+        conn.close()
+
+
+def db_list_acts(limit=100):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT a.id, a.act_type, fp.name, tp.name, a.period_from, a.period_to,
+                   a.act_number, a.generated_at, COUNT(al.id)
+            FROM acts a
+            LEFT JOIN parties fp ON fp.id = a.from_party_id
+            LEFT JOIN parties tp ON tp.id = a.to_party_id
+            LEFT JOIN act_lines al ON al.act_id = a.id
+            GROUP BY a.id, fp.name, tp.name
+            ORDER BY a.generated_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return [
+            {
+                "id": r[0], "act_type": r[1], "from_party": r[2], "to_party": r[3],
+                "period_from": r[4], "period_to": r[5], "act_number": r[6],
+                "generated_at": r[7], "lines_count": r[8],
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+# ---------- Генератор DOCX (чистый stdlib, без python-docx/lxml) ----------
+
+_DOCX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"""
+
+_DOCX_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+
+_DOCX_DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+_DOCX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+</w:styles>"""
+
+
+def _docx_p(text, bold=False, center=False, size=22):
+    align = '<w:jc w:val="center"/>' if center else ""
+    b = "<w:b/>" if bold else ""
+    return (
+        f'<w:p><w:pPr>{align}<w:rPr>{b}<w:sz w:val="{size}"/></w:rPr></w:pPr>'
+        f'<w:r><w:rPr>{b}<w:sz w:val="{size}"/></w:rPr><w:t xml:space="preserve">{xml_escape(text)}</w:t></w:r></w:p>'
+    )
+
+
+def _docx_table(headers, rows):
+    def cell(text, bold=False):
+        b = "<w:b/>" if bold else ""
+        return (
+            f'<w:tc><w:tcPr><w:tcBorders>'
+            f'<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>'
+            f'<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>'
+            f'</w:tcBorders></w:tcPr>'
+            f'<w:p><w:r><w:rPr>{b}<w:sz w:val="20"/></w:rPr>'
+            f'<w:t xml:space="preserve">{xml_escape(str(text))}</w:t></w:r></w:p></w:tc>'
+        )
+
+    def row(cells, bold=False):
+        return "<w:tr>" + "".join(cell(c, bold) for c in cells) + "</w:tr>"
+
+    tbl = '<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' \
+          '<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>' \
+          '<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>' \
+          '<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>' \
+          '</w:tblBorders></w:tblPr>'
+    tbl += row(headers, bold=True)
+    for r in rows:
+        tbl += row(r)
+    tbl += "</w:tbl>"
+    return tbl
+
+
+def generate_act_docx(act):
+    body_parts = []
+    body_parts.append(_docx_p("АКТ ПРИЁМА-ПЕРЕДАЧИ", bold=True, center=True, size=28))
+    body_parts.append(_docx_p(f"№ {act['act_number']}", bold=True, center=True, size=24))
+    body_parts.append(_docx_p(""))
+    period = f"{act['period_from'].strftime('%d.%m.%Y')} — {act['period_to'].strftime('%d.%m.%Y')}"
+    body_parts.append(_docx_p(f"Период: {period}"))
+    body_parts.append(_docx_p(f"Тип операции: {act['act_type']}"))
+    body_parts.append(_docx_p(f"Передающая сторона: {act['from_party'] or '—'}"))
+    body_parts.append(_docx_p(f"Принимающая сторона: {act['to_party'] or '—'}"))
+    body_parts.append(_docx_p(""))
+
+    if act["lines"]:
+        headers = ["№", "Устройство / дата / место"]
+        rows = [[i + 1, line] for i, line in enumerate(act["lines"])]
+        body_parts.append(_docx_table(headers, rows))
+    else:
+        body_parts.append(_docx_p("За указанный период операций не найдено."))
+
+    body_parts.append(_docx_p(""))
+    body_parts.append(_docx_p(""))
+    body_parts.append(_docx_p(f"Сдал: _________________ ({act['from_party'] or ''})"))
+    body_parts.append(_docx_p(""))
+    body_parts.append(_docx_p(f"Принял: _________________ ({act['to_party'] or ''})"))
+
+    sect_pr = (
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1134" w:right="850" w:bottom="1134" w:left="1701"/></w:sectPr>'
+    )
+
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body>" + "".join(body_parts) + sect_pr + "</w:body></w:document>"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES)
+        z.writestr("_rels/.rels", _DOCX_RELS)
+        z.writestr("word/document.xml", document_xml)
+        z.writestr("word/styles.xml", _DOCX_STYLES)
+        z.writestr("word/_rels/document.xml.rels", _DOCX_DOC_RELS)
+    return buf.getvalue()
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_html(self, html, status=200):
         body = html.encode("utf-8")
@@ -1457,6 +1690,53 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(row)
             return
 
+        if path == "/acts":
+            try:
+                acts = db_list_acts()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(acts), "acts": acts})
+            return
+
+        m = ACT_DOWNLOAD_RE.match(path)
+        if m:
+            act_id = int(m.group(1))
+            try:
+                act = db_get_act(act_id)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            if not act:
+                self._send_json({"error": f"Акт {act_id} не найден"}, status=404)
+                return
+            docx_bytes = generate_act_docx(act)
+            filename = f"Akt_{act['act_number']}.docx"
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(docx_bytes)))
+            self.end_headers()
+            self.wfile.write(docx_bytes)
+            return
+
+        m = ACT_RE.match(path)
+        if m:
+            act_id = int(m.group(1))
+            try:
+                act = db_get_act(act_id)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            if not act:
+                self._send_json({"error": f"Акт {act_id} не найден"}, status=404)
+                return
+            self._send_json(act)
+            return
+
         self._send_json({"error": "не найдено"}, status=404)
 
     def do_POST(self):
@@ -1468,6 +1748,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/trips":
             self._handle_create_trip()
+            return
+
+        if path == "/acts":
+            self._handle_create_act()
             return
 
         m = TRIP_CLOSE_RE.match(path)
@@ -1736,6 +2020,42 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"stop_id": stop_id, "zpu_number": zpu_number, "status": "updated"})
+
+    def _handle_create_act(self):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        act_type = (body.get("act_type") or "").strip()
+        from_party = (body.get("from_party") or "").strip()
+        to_party = (body.get("to_party") or "").strip()
+
+        if act_type not in ("передача", "возврат"):
+            self._send_json({"error": "act_type должен быть 'передача' или 'возврат'"}, status=400)
+            return
+        if not from_party or not to_party:
+            self._send_json({"error": "Укажите from_party и to_party"}, status=400)
+            return
+
+        try:
+            period_from = datetime.datetime.strptime(body.get("period_from"), "%Y-%m-%d").date()
+            period_to = datetime.datetime.strptime(body.get("period_to"), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            self._send_json({"error": "period_from/period_to должны быть в формате ГГГГ-ММ-ДД"}, status=400)
+            return
+
+        # период включительно: конец дня period_to
+        period_to_exclusive = period_to + datetime.timedelta(days=1)
+
+        try:
+            act_id, count = db_create_act(act_type, from_party, to_party, period_from, period_to_exclusive)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        self._send_json({"id": act_id, "operations_count": count, "status": "created"}, status=201)
 
 
 if __name__ == "__main__":
