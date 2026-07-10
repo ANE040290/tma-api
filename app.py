@@ -500,12 +500,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <textarea id="act-tracker-list" rows="2" style="width:100%"></textarea>
       </div>
       <div class="field"><label>Цена за ед., тенге (трекеры)</label><input id="act-tracker-price" type="number" value="60000"></div>
-
-      <div class="full">
-        <label>Закладки (серийные номера через запятую или с новой строки)</label>
-        <textarea id="act-lock-list" rows="2" style="width:100%"></textarea>
-      </div>
-      <div class="field"><label>Цена за ед., тенге (закладки)</label><input id="act-lock-price" type="number" value="0"></div>
     </div>
 
     <h4 style="margin-top:20px">Прочие позиции (ЗПУ и всё, что впишете вручную)</h4>
@@ -1077,7 +1071,7 @@ function renderActDeviceSearch() {
 }
 
 function addDeviceToAct(serial, deviceType) {
-  const fieldId = deviceType === 'ezpu' ? 'act-ezpu-list' : deviceType === 'tracker' ? 'act-tracker-list' : 'act-lock-list';
+  const fieldId = deviceType === 'ezpu' ? 'act-ezpu-list' : 'act-tracker-list';
   const el = document.getElementById(fieldId);
   const current = el.value.split(/[\n,]+/).map(s => s.trim()).filter(s => s);
   if (!current.includes(serial)) current.push(serial);
@@ -1124,10 +1118,6 @@ async function submitAct() {
   const trackerPrice = parseFloat(document.getElementById('act-tracker-price').value) || null;
   if (trackerSerials.length) lines.push({item_name: 'Concox AT4', serials: trackerSerials, qty: trackerSerials.length, unit_price: trackerPrice, device_type: 'tracker'});
 
-  const lockSerials = parseSerialsField('act-lock-list');
-  const lockPrice = parseFloat(document.getElementById('act-lock-price').value) || null;
-  if (lockSerials.length) lines.push({item_name: 'Трекер-закладка', serials: lockSerials, qty: lockSerials.length, unit_price: lockPrice, device_type: 'lock'});
-
   document.querySelectorAll('#act-custom-lines .waypoint-row').forEach(row => {
     const id = row.id;
     const name = document.getElementById(id + '-name').value.trim();
@@ -1158,7 +1148,7 @@ async function submitAct() {
   if (r.status === 201) {
     msg.textContent = 'Акт № ' + data.act_number + ' создан';
     msg.className = 'ok';
-    ['act-ezpu-list','act-tracker-list','act-lock-list'].forEach(id => document.getElementById(id).value = '');
+    ['act-ezpu-list','act-tracker-list'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('act-custom-lines').innerHTML = '';
     loadActs();
   } else {
@@ -1753,7 +1743,7 @@ _DOCX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:styles>"""
 
 
-def _docx_p(text, bold=False, center=False, italic=False, size=22, justify=False):
+def _docx_p(text, bold=False, center=False, italic=False, size=22, justify=False, space_after=60):
     align = ""
     if center:
         align = '<w:jc w:val="center"/>'
@@ -1762,8 +1752,9 @@ def _docx_p(text, bold=False, center=False, italic=False, size=22, justify=False
     b = "<w:b/>" if bold else ""
     i = "<w:i/>" if italic else ""
     rpr = f'{b}{i}<w:sz w:val="{size}"/>'
+    spacing = f'<w:spacing w:after="{space_after}" w:line="240" w:lineRule="auto"/>'
     return (
-        f'<w:p><w:pPr>{align}<w:rPr>{rpr}</w:rPr></w:pPr>'
+        f'<w:p><w:pPr>{align}{spacing}<w:rPr>{rpr}</w:rPr></w:pPr>'
         f'<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space="preserve">{xml_escape(text)}</w:t></w:r></w:p>'
     )
 
@@ -1832,11 +1823,9 @@ def generate_act_docx(act):
         '</w:tc></w:tr></w:tbl>'
     )
     body_parts.append(header_tbl)
-    body_parts.append(_docx_p(""))
 
-    body_parts.append(_docx_p("АКТ ПРИЕМА-ПЕРЕДАЧИ ОБОРУДОВАНИЯ", bold=True, center=True, size=26))
-    body_parts.append(_docx_p(f"№{act['act_number']} {_fmt_ru_date(act['act_date'])}", bold=True, center=True, size=24))
-    body_parts.append(_docx_p(""))
+    body_parts.append(_docx_p("АКТ ПРИЕМА-ПЕРЕДАЧИ ОБОРУДОВАНИЯ", bold=True, center=True, size=26, space_after=20))
+    body_parts.append(_docx_p(f"№{act['act_number']} {_fmt_ru_date(act['act_date'])}", bold=True, center=True, size=24, space_after=160))
 
     preamble = (
         f'ТОО «Транс Мониторинг Автоматизация», в лице Директора {act["director_name"]} '
@@ -1846,10 +1835,8 @@ def generate_act_docx(act):
         f'приема-передачи Оборудования, согласно договора от {act["contract_date"].strftime("%d.%m.%Y")} '
         f'№ {act["contract_number"]}, заключенному между Сторонами, о нижеследующем:'
     )
-    body_parts.append(_docx_p(preamble, justify=True))
-    body_parts.append(_docx_p(""))
-    body_parts.append(_docx_p("1. " + verb_block, justify=True))
-    body_parts.append(_docx_p(""))
+    body_parts.append(_docx_p(preamble, justify=True, space_after=140))
+    body_parts.append(_docx_p("1. " + verb_block, justify=True, space_after=100))
 
     headers = ["№ п/п", "Наименование оборудования", "Заводской (серийный) номер", "Ед. изм.", "Кол-во", "Стоимость, тенге."]
     rows = []
@@ -1863,29 +1850,28 @@ def generate_act_docx(act):
             _fmt_money(price) if line["unit_price"] is not None else "—",
         ])
     body_parts.append(_docx_table(headers, rows))
-    body_parts.append(_docx_p(""))
 
     if total > 0:
         body_parts.append(_docx_p(
-            f"Общая стоимость Оборудования, {'передаваемого Исполнителем' if direction == 'передача' else 'возвращаемого Заказчиком'}, составляет:"
+            f"Общая стоимость Оборудования, {'передаваемого Исполнителем' if direction == 'передача' else 'возвращаемого Заказчиком'}, составляет:",
+            space_after=20,
         ))
-        body_parts.append(_docx_p(f"{_fmt_money(total)} тенге", bold=False))
-        body_parts.append(_docx_p(""))
+        body_parts.append(_docx_p(f"{_fmt_money(total)} тенге", bold=False, space_after=140))
+    else:
+        body_parts.append(_docx_p("", space_after=100))
 
     body_parts.append(_docx_p(
         "2. Претензий по внешнему виду, целостности и комплектации устройств, у Заказчика к Исполнителю "
-        "по передаваемому Оборудованию не имеется.", justify=True
+        "по передаваемому Оборудованию не имеется.", justify=True, space_after=60
     ))
     body_parts.append(_docx_p(
         "3. Подписав настоящий акт, Стороны подтверждают, что обязательства Сторон по приему-передаче "
-        "Оборудования по Договору исполнены надлежащим образом.", justify=True
+        "Оборудования по Договору исполнены надлежащим образом.", justify=True, space_after=60
     ))
     body_parts.append(_docx_p(
         "4. Настоящий акт подписан в 2 (двух) подлинных экземплярах на русском языке по одному "
-        "для каждой из Сторон.", justify=True
+        "для каждой из Сторон.", justify=True, space_after=240
     ))
-    body_parts.append(_docx_p(""))
-    body_parts.append(_docx_p(""))
 
     sig_tbl = (
         '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/>'
