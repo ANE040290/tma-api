@@ -298,6 +298,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="tab-btn active" id="tab-btn-devices" onclick="switchTab('devices')">Устройства</button>
     <button class="tab-btn" id="tab-btn-trips" onclick="switchTab('trips')">Рейсы</button>
     <button class="tab-btn" id="tab-btn-acts" onclick="switchTab('acts')">Акты</button>
+    <button class="tab-btn" id="tab-btn-reports" onclick="switchTab('reports')">Отчёты</button>
   </div>
 
   <div class="tab-view active" id="tab-devices">
@@ -526,6 +527,45 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   </div>
 
+  <div class="tab-view" id="tab-reports">
+
+  <div class="panel" id="reports-list-panel">
+    <h3>Отчёты по компаниям</h3>
+    <div id="reports-company-list" class="filters"></div>
+  </div>
+
+  <div class="panel" id="reports-detail-panel" style="display:none">
+    <button class="close-btn" onclick="closeReportDetail()">×</button>
+    <h3 id="reports-detail-title">Отчёт</h3>
+    <div class="filters">
+      <div class="field">
+        <label>Месяц</label>
+        <select id="report-month"></select>
+      </div>
+      <div class="field">
+        <label>Год</label>
+        <input id="report-year" type="number" style="width:90px">
+      </div>
+      <div class="field">
+        <label>Ставка, тенге/сутки</label>
+        <input id="report-rate" type="number" value="4060" style="width:100px">
+      </div>
+      <button onclick="loadReportDetail()">Показать</button>
+    </div>
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th>№</th><th>Борт</th><th>ЭЗПУ</th><th>Откуда</th><th>Куда</th>
+        <th>Навешивание</th><th>Снятие</th><th>Дней</th><th>Ставка</th><th>Сумма</th>
+      </tr></thead>
+      <tbody id="report-rows-body"></tbody>
+    </table>
+    </div>
+    <div id="report-total" style="margin-top:14px; font-weight:600; font-size:15px"></div>
+  </div>
+
+  </div>
+
 </div>
 
 <script>
@@ -659,11 +699,14 @@ function switchTab(name) {
   document.getElementById('tab-devices').classList.toggle('active', name === 'devices');
   document.getElementById('tab-trips').classList.toggle('active', name === 'trips');
   document.getElementById('tab-acts').classList.toggle('active', name === 'acts');
+  document.getElementById('tab-reports').classList.toggle('active', name === 'reports');
   document.getElementById('tab-btn-devices').classList.toggle('active', name === 'devices');
   document.getElementById('tab-btn-trips').classList.toggle('active', name === 'trips');
   document.getElementById('tab-btn-acts').classList.toggle('active', name === 'acts');
+  document.getElementById('tab-btn-reports').classList.toggle('active', name === 'reports');
   if (name === 'trips') loadTrips();
   if (name === 'acts') { loadAllDevicesCache(); loadActs(); if (!document.getElementById('act-date').value) document.getElementById('act-date').value = new Date().toISOString().slice(0,10); }
+  if (name === 'reports') renderReportsCompanyList();
 }
 
 let editingTrips = new Set();
@@ -1177,6 +1220,71 @@ async function loadActs() {
     body.appendChild(tr);
   });
   document.getElementById('acts-count-label').textContent = data.count + ' актов';
+}
+
+const REPORT_COMPANIES = ['ТОО ТК Мегаполис Казахстан', 'ТОО ТМЕ', 'ТОО СОП ТЖК'];
+const REPORT_MONTHS = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+let currentReportCompany = null;
+
+function renderReportsCompanyList() {
+  const box = document.getElementById('reports-company-list');
+  box.innerHTML = REPORT_COMPANIES.map(c => `<button onclick="openReportDetail('${c}')">${c}</button>`).join('');
+}
+
+function openReportDetail(company) {
+  currentReportCompany = company;
+  document.getElementById('reports-detail-panel').style.display = 'block';
+  document.getElementById('reports-detail-title').textContent = 'Отчёт по ЭЗПУ — ' + company;
+
+  const monthSelect = document.getElementById('report-month');
+  if (!monthSelect.options.length) {
+    monthSelect.innerHTML = REPORT_MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('');
+  }
+  const now = new Date();
+  monthSelect.value = now.getMonth() + 1;
+  document.getElementById('report-year').value = now.getFullYear();
+
+  document.getElementById('reports-detail-panel').scrollIntoView({behavior: 'smooth'});
+  loadReportDetail();
+}
+
+function closeReportDetail() {
+  document.getElementById('reports-detail-panel').style.display = 'none';
+}
+
+async function loadReportDetail() {
+  if (!currentReportCompany) return;
+  const year = document.getElementById('report-year').value;
+  const month = document.getElementById('report-month').value;
+  const rate = document.getElementById('report-rate').value;
+  const params = new URLSearchParams({contractor: currentReportCompany, year, month, rate});
+  const r = await fetch('/reports/ezpu-billing?' + params.toString());
+  const data = await r.json();
+  const body = document.getElementById('report-rows-body');
+  body.innerHTML = '';
+  if (!data.rows || !data.rows.length) {
+    body.innerHTML = '<tr><td colspan="10" style="color:#888">Нет закрытых рейсов с ЭЗПУ за этот период</td></tr>';
+    document.getElementById('report-total').textContent = '';
+    return;
+  }
+  data.rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${row.num}</td>
+      <td>${row.board_number || '—'}</td>
+      <td>${row.ezpu_serial}</td>
+      <td>${row.origin || '—'}</td>
+      <td>${row.destination || '—'}</td>
+      <td>${fmtDate(row.hang_datetime)}</td>
+      <td>${fmtDate(row.removal_datetime)}</td>
+      <td>${row.days}</td>
+      <td>${row.rate}</td>
+      <td>${row.amount.toLocaleString('ru-RU')}</td>
+    `;
+    body.appendChild(tr);
+  });
+  document.getElementById('report-total').textContent =
+    'Итого: ' + data.total_amount.toLocaleString('ru-RU') + ' тенге (' + data.rows.length + ' рейсов)';
 }
 
 loadDevices();
@@ -1716,7 +1824,64 @@ def db_list_acts(limit=100):
         conn.close()
 
 
-# ---------- Генератор DOCX (чистый stdlib, без python-docx/lxml) ----------
+# ---------- Отчёт по ЭЗПУ для выставления счёта (расчёт суток) ----------
+
+DEFAULT_EZPU_RATE = 4060
+
+
+def _billing_days(hang_dt, removal_dt, cutoff_hour=11):
+    """Сутки считаются 'от 11:00 до 11:00'. Если сняли до 11:00 - этот
+    день не засчитывается (как ранний выезд из отеля)."""
+    hang_date = hang_dt.date()
+    removal_date = removal_dt.date()
+    if removal_dt.time() < datetime.time(cutoff_hour, 0):
+        removal_date = removal_date - datetime.timedelta(days=1)
+    days = (removal_date - hang_date).days + 1
+    return max(days, 1)
+
+
+def db_get_ezpu_billing_report(contractor_name, year, month, rate=DEFAULT_EZPU_RATE):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        period_from = datetime.date(year, month, 1)
+        period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
+
+        cur.execute(
+            """
+            SELECT t.id, t.board_number, d.serial_number, t.hang_datetime, t.removal_datetime,
+                   (SELECT location FROM trip_stops WHERE trip_id = t.id ORDER BY sequence LIMIT 1) AS origin,
+                   (SELECT location FROM trip_stops WHERE trip_id = t.id ORDER BY sequence DESC LIMIT 1) AS destination
+            FROM trips t
+            JOIN devices d ON d.id = t.ezpu_device_id
+            JOIN parties p ON p.id = t.contractor_id
+            WHERE p.name = %s AND t.status = 'снят'
+              AND t.hang_datetime >= %s AND t.hang_datetime < %s
+              AND t.removal_datetime IS NOT NULL
+            ORDER BY t.hang_datetime
+            """,
+            (contractor_name, period_from, period_to),
+        )
+        rows = []
+        total_amount = 0
+        for i, r in enumerate(cur.fetchall(), start=1):
+            trip_id, board, serial, hang_dt, removal_dt, origin, destination = r
+            days = _billing_days(hang_dt, removal_dt)
+            amount = days * rate
+            total_amount += amount
+            rows.append({
+                "num": i, "trip_id": trip_id, "board_number": board, "ezpu_serial": serial,
+                "origin": origin, "destination": destination,
+                "hang_datetime": hang_dt, "removal_datetime": removal_dt,
+                "days": days, "rate": rate, "amount": amount,
+            })
+        return {
+            "contractor": contractor_name, "year": year, "month": month, "rate": rate,
+            "rows": rows, "total_amount": total_amount,
+        }
+    finally:
+        conn.close()
+
 
 _DOCX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -2028,6 +2193,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"count": len(acts), "acts": acts})
+            return
+
+        if path == "/reports/ezpu-billing":
+            contractor = qs.get("contractor", [None])[0]
+            year = qs.get("year", [None])[0]
+            month = qs.get("month", [None])[0]
+            rate = qs.get("rate", [None])[0]
+            if not contractor or not year or not month:
+                self._send_json({"error": "Укажите contractor, year, month"}, status=400)
+                return
+            try:
+                year = int(year)
+                month = int(month)
+                rate = float(rate) if rate else DEFAULT_EZPU_RATE
+            except ValueError:
+                self._send_json({"error": "year/month/rate должны быть числами"}, status=400)
+                return
+            try:
+                report = db_get_ezpu_billing_report(contractor, year, month, rate)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(report)
             return
 
         m = ACT_DOWNLOAD_RE.match(path)
