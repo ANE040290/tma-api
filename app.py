@@ -1851,8 +1851,7 @@ def _biglock_opener():
     return opener
 
 
-def biglock_search_notifications(payload):
-    opener = _biglock_opener()
+def _biglock_search_with_opener(opener, payload):
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         BIGLOCK_BASE_URL + "/api/usernotifications/my/search", data=body,
@@ -1862,38 +1861,62 @@ def biglock_search_notifications(payload):
         return json.loads(resp.read())
 
 
-def biglock_events_for_object(native_id, limit=200, codes=None):
-    """Тянет последние события BigLock и фильтрует по номеру борта
-    (GuardedObject.NativeId). Диагностический режим: пока неизвестны
-    точные значения DeviceEvent.Type для навешивания/снятия, отдаём
-    все события как есть, чтобы можно было их опознать вручную."""
-    data = biglock_search_notifications({
-        "Page": 1,
-        "Limit": limit,
-        "OrderBy": "CreateTimeDesc",
-        "MediaType": "System",
-        "Codes": codes or ["LockEvent"],
-    })
-    items = data.get("Items", [])
+def biglock_search_notifications(payload):
+    opener = _biglock_opener()
+    return _biglock_search_with_opener(opener, payload)
+
+
+def biglock_events_for_object(native_id, limit=200, codes=None, page_size=200, max_pages=25):
+    """Тянет события BigLock постранично (сервер, похоже, игнорирует
+    большой Limit за один запрос - надёжнее пролистать несколько
+    страниц) и фильтрует по номеру борта (GuardedObject.NativeId).
+    Диагностический режим: пока неизвестны точные значения
+    DeviceEvent.Type для навешивания/снятия, отдаём все события как
+    есть, чтобы можно было их опознать вручную."""
     result = []
-    for item in items:
-        params = item.get("Parameters", {})
-        guarded = params.get("GuardedObject", {})
-        if native_id and guarded.get("NativeId") != native_id:
-            continue
-        device_event = params.get("DeviceEvent", {})
-        result.append({
-            "id": item.get("Id"),
-            "create_time": item.get("CreateTime"),
-            "event_type": device_event.get("Type"),
-            "event_time": device_event.get("CreateTime"),
-            "native_id": guarded.get("NativeId"),
-            "ezpu_serial": (params.get("ElectricDevice") or {}).get("CaseId"),
-            "zpu_number": (params.get("MechanicalDevice") or {}).get("CaseId"),
-            "lat": (params.get("DevicePoint") or {}).get("Latitude"),
-            "lon": (params.get("DevicePoint") or {}).get("Longitude"),
+    total_count = None
+    scanned = 0
+    page = 1
+    opener = _biglock_opener()
+    while scanned < limit and page <= max_pages:
+        data = _biglock_search_with_opener(opener, {
+            "Page": page,
+            "Limit": page_size,
+            "OrderBy": "CreateTimeDesc",
+            "MediaType": "System",
+            "Codes": codes or ["LockEvent"],
         })
-    return {"total_count": data.get("TotalCount"), "matched": len(result), "events": result}
+        if total_count is None:
+            total_count = data.get("TotalCount")
+        items = data.get("Items", [])
+        if not items:
+            break
+        for item in items:
+            params = item.get("Parameters", {})
+            guarded = params.get("GuardedObject", {})
+            if native_id and guarded.get("NativeId") != native_id:
+                continue
+            device_event = params.get("DeviceEvent", {})
+            result.append({
+                "id": item.get("Id"),
+                "create_time": item.get("CreateTime"),
+                "event_type": device_event.get("Type"),
+                "event_time": device_event.get("CreateTime"),
+                "native_id": guarded.get("NativeId"),
+                "ezpu_serial": (params.get("ElectricDevice") or {}).get("CaseId"),
+                "zpu_number": (params.get("MechanicalDevice") or {}).get("CaseId"),
+                "lat": (params.get("DevicePoint") or {}).get("Latitude"),
+                "lon": (params.get("DevicePoint") or {}).get("Longitude"),
+            })
+        scanned += len(items)
+        page += 1
+        if len(items) < page_size:
+            break  # достигли конца выдачи
+
+    return {
+        "total_count": total_count, "scanned": scanned, "pages_fetched": page - 1,
+        "matched": len(result), "events": result,
+    }
 
 
 # ---------- Отчёт по ЭЗПУ для выставления счёта (расчёт суток) ----------
