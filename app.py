@@ -21,6 +21,8 @@ import re
 import json
 import datetime
 import zipfile
+import urllib.request
+import http.cookiejar
 import io
 from xml.sax.saxutils import escape as xml_escape
 from urllib.parse import urlparse, parse_qs
@@ -1824,6 +1826,76 @@ def db_list_acts(limit=100):
         conn.close()
 
 
+# ---------- Клиент BigLock API (только stdlib, без aiohttp) ----------
+
+BIGLOCK_BASE_URL = "https://www.biglock.pro"
+
+
+def _biglock_opener():
+    login = os.environ.get("BIGLOCK_LOGIN")
+    password = os.environ.get("BIGLOCK_PASSWORD")
+    if not login or not password:
+        raise RuntimeError("BIGLOCK_LOGIN / BIGLOCK_PASSWORD не заданы в переменных окружения")
+
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+    login_body = json.dumps({"Login": login, "Password": password, "Remember": True}).encode("utf-8")
+    login_req = urllib.request.Request(
+        BIGLOCK_BASE_URL + "/api/auth/login", data=login_body,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with opener.open(login_req, timeout=15) as resp:
+        resp.read()  # авторизация задаёт cookie в opener, тело ответа не нужно
+
+    return opener
+
+
+def biglock_search_notifications(payload):
+    opener = _biglock_opener()
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        BIGLOCK_BASE_URL + "/api/usernotifications/my/search", data=body,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with opener.open(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def biglock_events_for_object(native_id, limit=200, codes=None):
+    """Тянет последние события BigLock и фильтрует по номеру борта
+    (GuardedObject.NativeId). Диагностический режим: пока неизвестны
+    точные значения DeviceEvent.Type для навешивания/снятия, отдаём
+    все события как есть, чтобы можно было их опознать вручную."""
+    data = biglock_search_notifications({
+        "Page": 1,
+        "Limit": limit,
+        "OrderBy": "CreateTimeDesc",
+        "MediaType": "System",
+        "Codes": codes or ["LockEvent"],
+    })
+    items = data.get("Items", [])
+    result = []
+    for item in items:
+        params = item.get("Parameters", {})
+        guarded = params.get("GuardedObject", {})
+        if native_id and guarded.get("NativeId") != native_id:
+            continue
+        device_event = params.get("DeviceEvent", {})
+        result.append({
+            "id": item.get("Id"),
+            "create_time": item.get("CreateTime"),
+            "event_type": device_event.get("Type"),
+            "event_time": device_event.get("CreateTime"),
+            "native_id": guarded.get("NativeId"),
+            "ezpu_serial": (params.get("ElectricDevice") or {}).get("CaseId"),
+            "zpu_number": (params.get("MechanicalDevice") or {}).get("CaseId"),
+            "lat": (params.get("DevicePoint") or {}).get("Latitude"),
+            "lon": (params.get("DevicePoint") or {}).get("Longitude"),
+        })
+    return {"total_count": data.get("TotalCount"), "matched": len(result), "events": result}
+
+
 # ---------- Отчёт по ЭЗПУ для выставления счёта (расчёт суток) ----------
 
 DEFAULT_EZPU_RATE = 4060
@@ -2216,6 +2288,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json(report)
+            return
+
+        if path == "/biglock/events":
+            native_id = qs.get("native_id", [None])[0]
+            try:
+                limit = int(qs.get("limit", ["200"])[0])
+            except ValueError:
+                limit = 200
+            try:
+                result = biglock_events_for_object(native_id, limit=limit)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(result)
             return
 
         m = ACT_DOWNLOAD_RE.match(path)
