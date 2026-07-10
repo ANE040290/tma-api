@@ -2296,8 +2296,10 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int(qs.get("limit", ["200"])[0])
             except ValueError:
                 limit = 200
+            codes_raw = qs.get("codes", [None])[0]
+            codes = codes_raw.split(",") if codes_raw else None
             try:
-                result = biglock_events_for_object(native_id, limit=limit)
+                result = biglock_events_for_object(native_id, limit=limit, codes=codes)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
