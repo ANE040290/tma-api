@@ -1892,14 +1892,18 @@ def _biglock_opener():
     return opener
 
 
-def _biglock_search_with_opener(opener, payload):
+def _biglock_post(opener, path, payload):
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        BIGLOCK_BASE_URL + "/api/usernotifications/my/search", data=body,
+        BIGLOCK_BASE_URL + path, data=body,
         headers={"Content-Type": "application/json"}, method="POST",
     )
     with opener.open(req, timeout=30) as resp:
         return json.loads(resp.read())
+
+
+def _biglock_search_with_opener(opener, payload):
+    return _biglock_post(opener, "/api/usernotifications/my/search", payload)
 
 
 def biglock_search_notifications(payload):
@@ -2030,6 +2034,83 @@ def biglock_device_sessions(ezpu_serial, limit=5000, codes=None, page_size=200, 
     return {
         "ezpu_serial": ezpu_serial, "total_count": total_count, "scanned": scanned,
         "pages_fetched": page - 1, "matched_events": len(matched), "sessions": sessions,
+    }
+
+
+def biglock_device_status(case_id):
+    """Проверяет текущий статус конкретной пломбы (по CaseId, напр.
+    GNS10759) через связку electricdevices -> devicepackets: находит
+    внутренний DeviceId, затем смотрит последний 'пакет' устройства -
+    если у него есть DevicePointId, значит устройство сейчас 'поставлено
+    на охрану' (навешено); отсутствие/смена DevicePointId - снято."""
+    opener = _biglock_opener()
+
+    devices_data = _biglock_post(opener, "/api/electricdevices/search", {"SkipCount": True})
+    device = None
+    for item in devices_data.get("Items", []):
+        if item.get("CaseId") == case_id:
+            device = item
+            break
+    if not device:
+        return {"error": f"Устройство с CaseId={case_id} не найдено в BigLock", "case_id": case_id}
+
+    device_id = device.get("DeviceId")
+
+    packets_data = _biglock_post(opener, "/api/devicepackets/search", {
+        "DeviceId": device_id, "Limit": 1, "SkipCount": True, "OrderBy": "TimeDesc",
+    })
+    items = packets_data.get("Items", [])
+    device_point_id = items[0].get("DevicePointId") if items else None
+
+    return {
+        "case_id": case_id,
+        "device_id": device_id,
+        "client_name": device.get("ClientName"),
+        "on_guard": device_point_id is not None,
+        "device_point_id": device_point_id,
+        "last_packet_raw": items[0] if items else None,
+    }
+
+
+def biglock_lock_status(mechanical_case_id):
+    """Самый прямой способ узнать навешивание/снятие: ищет по номеру
+    разовой пломбы (МК, напр. CTP1249845) записи LockedDevice - там
+    сразу есть LockTime (навешено), ReleaseTime (снято), IsReleased."""
+    opener = _biglock_opener()
+    data = _biglock_post(opener, "/api/lockeddevices/search", {
+        "MechanicalDeviceCaseId": mechanical_case_id, "Limit": 10,
+    })
+    items = data.get("Items", [])
+    return {
+        "zpu_number": mechanical_case_id,
+        "total_count": data.get("TotalCount"),
+        "records": [
+            {
+                "lock_time": it.get("LockTime"),
+                "release_time": it.get("ReleaseTime"),
+                "is_released": it.get("IsReleased"),
+                "raw": it,
+            }
+            for it in items
+        ],
+    }
+
+
+def biglock_guarded_object_status(native_id, obj_type="Auto"):
+    """Статус объекта охраны (машины/борта) по NativeId напрямую:
+    Free (свободен) / LockInProgress (постановка идёт) / Locked (на охране)."""
+    opener = _biglock_opener()
+    data = _biglock_post(opener, "/api/guardedobjects/search", {
+        "Type": obj_type, "NativeId": native_id, "Limit": 10,
+    })
+    items = data.get("Items", [])
+    return {
+        "native_id": native_id,
+        "total_count": data.get("TotalCount"),
+        "objects": [
+            {"status": it.get("Status"), "id": it.get("Id"), "raw": it}
+            for it in items
+        ],
     }
 
 
@@ -2466,6 +2547,46 @@ class Handler(BaseHTTPRequestHandler):
                 codes = None
             try:
                 result = biglock_device_sessions(ezpu_serial, limit=limit, codes=codes)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(result)
+            return
+
+        if path == "/biglock/device-status":
+            case_id = qs.get("case_id", [None])[0]
+            if not case_id:
+                self._send_json({"error": "Укажите case_id"}, status=400)
+                return
+            try:
+                result = biglock_device_status(case_id)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(result)
+            return
+
+        if path == "/biglock/lock-status":
+            zpu_number = qs.get("zpu_number", [None])[0]
+            if not zpu_number:
+                self._send_json({"error": "Укажите zpu_number"}, status=400)
+                return
+            try:
+                result = biglock_lock_status(zpu_number)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(result)
+            return
+
+        if path == "/biglock/guarded-object":
+            native_id = qs.get("native_id", [None])[0]
+            obj_type = qs.get("type", ["Auto"])[0]
+            if not native_id:
+                self._send_json({"error": "Укажите native_id"}, status=400)
+                return
+            try:
+                result = biglock_guarded_object_status(native_id, obj_type)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
