@@ -39,6 +39,7 @@ TRIP_RE = re.compile(r"^/trips/(\d+)$")
 TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
 TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
+TRIP_STOP_ARRIVE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/arrive$")
 TRIP_STOP_ZPU_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/zpu$")
 ACT_RE = re.compile(r"^/acts/(\d+)$")
 ACT_DOWNLOAD_RE = re.compile(r"^/acts/(\d+)/download$")
@@ -893,10 +894,17 @@ async function openTripDetail(id) {
   }
   const rows = t.stops.map(s => {
     const done = s.status === 'исполнено';
+    const arrived = !!s.arrived_at;
+    let arriveBtn = '';
+    if (s.stop_type === 'выгрузка' && !done) {
+      arriveBtn = arrived
+        ? '<span style="color:#1e40af; margin-right:8px">прибыл ' + fmtDate(s.arrived_at) + '</span>'
+        : `<button class="secondary" onclick="markArrived(${id}, ${s.id})" style="margin-right:8px">Прибыл на базу</button>`;
+    }
     const btn = done
-      ? '<span style="color:#166534">✓ ' + fmtDate(s.completed_at) + '</span>'
-      : `<button class="secondary" onclick="completeStop(${id}, ${s.id})">Исполнено</button>`;
-    return `<div class="hist-row"><b>${id}.${s.sequence}</b> ${s.stop_type} · ${s.location} ${btn}</div>`;
+      ? '<span style="color:#166534">✓ ' + (s.stop_type === 'выгрузка' ? 'снято ' : '') + fmtDate(s.completed_at) + '</span>'
+      : `<button class="secondary" onclick="completeStop(${id}, ${s.id})">${s.stop_type === 'выгрузка' ? 'Снято' : 'Исполнено'}</button>`;
+    return `<div class="hist-row"><b>${id}.${s.sequence}</b> ${s.stop_type} · ${s.location} ${arriveBtn}${btn}</div>`;
   }).join('');
   document.getElementById('trip-detail-body').innerHTML = `
     <div style="margin-bottom:10px">
@@ -908,6 +916,20 @@ async function openTripDetail(id) {
   `;
 }
 function closeTripDetail() { document.getElementById('trip-detail-panel').style.display = 'none'; }
+
+async function markArrived(tripId, stopId) {
+  const r = await fetch(`/trips/${tripId}/stops/${stopId}/arrive`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  });
+  if (r.status === 200) {
+    openTripDetail(tripId);
+  } else {
+    const data = await r.json();
+    alert(data.error || 'Ошибка');
+  }
+}
 
 async function completeStop(tripId, stopId) {
   const r = await fetch(`/trips/${tripId}/stops/${stopId}/complete`, {
@@ -1461,6 +1483,24 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
         conn.close()
 
 
+def db_mark_stop_arrived(trip_id, stop_id, arrived_dt):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE trip_stops SET arrived_at = %s WHERE id = %s AND trip_id = %s RETURNING id",
+            (arrived_dt, stop_id, trip_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def db_complete_stop(trip_id, stop_id, completed_dt, location_override):
     conn = get_connection()
     try:
@@ -1559,12 +1599,12 @@ def db_get_trip(trip_id):
         if not r:
             return None
         cur.execute(
-            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number, arrived_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
         stops = [
             {"id": s[0], "stop_type": s[1], "sequence": s[2], "location": s[3], "status": s[4],
-             "completed_at": s[5], "zpu_number": s[6]}
+             "completed_at": s[5], "zpu_number": s[6], "arrived_at": s[7]}
             for s in cur.fetchall()
         ]
         return {
@@ -1610,17 +1650,18 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at FROM trip_stops
+                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at, arrived_at FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at in cur.fetchall():
+            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at, arrived_at in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
                 stops_by_trip[trip_id][key].append({
                     "id": stop_id, "location": location, "status": st_status,
                     "sequence": sequence, "zpu_number": zpu, "completed_at": completed_at,
+                    "arrived_at": arrived_at,
                 })
 
         return [
@@ -2501,6 +2542,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_complete_stop(int(m.group(1)), int(m.group(2)))
             return
 
+        m = TRIP_STOP_ARRIVE_RE.match(path)
+        if m:
+            self._handle_mark_arrived(int(m.group(1)), int(m.group(2)))
+            return
+
         m = TRIP_STOP_ZPU_RE.match(path)
         if m:
             self._handle_set_stop_zpu(int(m.group(1)), int(m.group(2)))
@@ -2704,6 +2750,31 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"id": trip_id, "status": "device_assigned"})
+
+    def _handle_mark_arrived(self, trip_id, stop_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        try:
+            arrived_dt = self._parse_dt(body.get("arrived_at"))
+        except ValueError:
+            self._send_json({"error": "arrived_at должен быть в формате ISO 8601"}, status=400)
+            return
+
+        try:
+            ok = db_mark_stop_arrived(trip_id, stop_id, arrived_dt)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if not ok:
+            self._send_json({"error": "Остановка не найдена"}, status=404)
+            return
+
+        self._send_json({"stop_id": stop_id, "status": "arrived"})
 
     def _handle_complete_stop(self, trip_id, stop_id):
         try:
