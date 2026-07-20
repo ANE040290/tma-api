@@ -2072,26 +2072,33 @@ def biglock_device_status(case_id):
     }
 
 
-def biglock_lock_status(mechanical_case_id=None, native_id=None, limit=10):
+def biglock_lock_status(mechanical_case_id=None, native_id=None, client_id=None,
+                         is_released=None, limit=10, order_by="LockTimeDesc"):
     """Самый прямой способ узнать навешивание/снятие: ищет записи
     LockedDevice - там сразу есть LockTime (навешено), ReleaseTime
-    (снято), IsReleased. Поиск по номеру разовой пломбы
-    (MechanicalDeviceCaseId, напр. CTP1249845) - проверено, реально
-    фильтрует. Поиск по ElectricDeviceCaseId (серийник ЭЗПУ) НЕ
-    работает - BigLock его тихо игнорирует и отдаёт всё подряд, поэтому
-    такой фильтр здесь не используется. Как запасной вариант можно
-    искать по номеру борта (GuardedObject.NativeId)."""
+    (снято), IsReleased. Реально рабочие фильтры (подтверждено из
+    структуры меню самого BigLock): MechanicalDeviceCaseId (номер
+    разовой пломбы), ClientId (напр. 56 = ТОО Мегаполис КЗ),
+    IsReleased (false = ещё в рейсе, не снята). NativeId (номер
+    борта) и ElectricDeviceCaseId (серийник ЭЗПУ) BigLock тихо
+    игнорирует - ими не пользуемся."""
     opener = _biglock_opener()
-    payload = {"Limit": limit}
+    payload = {"Limit": limit, "OrderBy": order_by}
     if mechanical_case_id:
         payload["MechanicalDeviceCaseId"] = mechanical_case_id
     if native_id:
         payload["NativeId"] = native_id
+    if client_id is not None:
+        payload["ClientId"] = client_id
+    if is_released is not None:
+        payload["IsReleased"] = is_released
     data = _biglock_post(opener, "/api/lockeddevices/search", payload)
     items = data.get("Items", [])
     return {
         "zpu_number": mechanical_case_id,
         "native_id": native_id,
+        "client_id": client_id,
+        "is_released": is_released,
         "total_count": data.get("TotalCount"),
         "records": [
             {
@@ -2578,15 +2585,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/biglock/lock-status":
             zpu_number = qs.get("zpu_number", [None])[0]
             native_id = qs.get("native_id", [None])[0]
-            if not zpu_number and not native_id:
-                self._send_json({"error": "Укажите zpu_number или native_id"}, status=400)
+            client_id_raw = qs.get("client_id", [None])[0]
+            is_released_raw = qs.get("is_released", [None])[0]
+            if not zpu_number and not native_id and not client_id_raw:
+                self._send_json({"error": "Укажите zpu_number, native_id или client_id"}, status=400)
                 return
             try:
                 limit = int(qs.get("limit", ["10"])[0])
             except ValueError:
                 limit = 10
+            client_id = int(client_id_raw) if client_id_raw else None
+            is_released = None
+            if is_released_raw is not None:
+                is_released = is_released_raw.lower() == "true"
             try:
-                result = biglock_lock_status(mechanical_case_id=zpu_number, native_id=native_id, limit=limit)
+                result = biglock_lock_status(
+                    mechanical_case_id=zpu_number, native_id=native_id,
+                    client_id=client_id, is_released=is_released, limit=limit,
+                )
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
