@@ -2072,22 +2072,26 @@ def biglock_device_status(case_id):
     }
 
 
-def biglock_lock_status(mechanical_case_id=None, electric_case_id=None, limit=10):
+def biglock_lock_status(mechanical_case_id=None, native_id=None, limit=10):
     """Самый прямой способ узнать навешивание/снятие: ищет записи
     LockedDevice - там сразу есть LockTime (навешено), ReleaseTime
-    (снято), IsReleased. Можно искать по номеру разовой пломбы (МК,
-    напр. CTP1249845) или по серийнику ЭЗПУ (ЭК, напр. GNS10759)."""
+    (снято), IsReleased. Поиск по номеру разовой пломбы
+    (MechanicalDeviceCaseId, напр. CTP1249845) - проверено, реально
+    фильтрует. Поиск по ElectricDeviceCaseId (серийник ЭЗПУ) НЕ
+    работает - BigLock его тихо игнорирует и отдаёт всё подряд, поэтому
+    такой фильтр здесь не используется. Как запасной вариант можно
+    искать по номеру борта (GuardedObject.NativeId)."""
     opener = _biglock_opener()
     payload = {"Limit": limit}
     if mechanical_case_id:
         payload["MechanicalDeviceCaseId"] = mechanical_case_id
-    if electric_case_id:
-        payload["ElectricDeviceCaseId"] = electric_case_id
+    if native_id:
+        payload["NativeId"] = native_id
     data = _biglock_post(opener, "/api/lockeddevices/search", payload)
     items = data.get("Items", [])
     return {
         "zpu_number": mechanical_case_id,
-        "ezpu_serial": electric_case_id,
+        "native_id": native_id,
         "total_count": data.get("TotalCount"),
         "records": [
             {
@@ -2573,16 +2577,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/biglock/lock-status":
             zpu_number = qs.get("zpu_number", [None])[0]
-            ezpu_serial = qs.get("ezpu_serial", [None])[0]
-            if not zpu_number and not ezpu_serial:
-                self._send_json({"error": "Укажите zpu_number или ezpu_serial"}, status=400)
+            native_id = qs.get("native_id", [None])[0]
+            if not zpu_number and not native_id:
+                self._send_json({"error": "Укажите zpu_number или native_id"}, status=400)
                 return
             try:
                 limit = int(qs.get("limit", ["10"])[0])
             except ValueError:
                 limit = 10
             try:
-                result = biglock_lock_status(mechanical_case_id=zpu_number, electric_case_id=ezpu_serial, limit=limit)
+                result = biglock_lock_status(mechanical_case_id=zpu_number, native_id=native_id, limit=limit)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
