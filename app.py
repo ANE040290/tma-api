@@ -21,6 +21,8 @@ import re
 import json
 import datetime
 import zipfile
+import time
+import threading
 import urllib.request
 import http.cookiejar
 import io
@@ -2249,6 +2251,77 @@ def biglock_guarded_object_status(native_id, obj_type="Auto"):
     }
 
 
+def db_get_active_trips_with_board():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, board_number FROM trips WHERE status = 'в пути' AND board_number IS NOT NULL"
+        )
+        return [{"id": r[0], "board_number": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def biglock_sync_trip_removal(trip_id, board_number):
+    """Проверяет статус борта в BigLock; если объект свободен (Free) -
+    закрывает ближайшую необработанную точку выгрузки рейса, используя
+    реальное время смены статуса (StatusTime) от BigLock."""
+    status_data = biglock_guarded_object_status(board_number)
+    objects = status_data.get("objects", [])
+    if not objects:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+
+    obj = objects[0]
+    if obj.get("status") != "Free":
+        return {"trip_id": trip_id, "board_number": board_number, "action": "still_locked"}
+
+    status_time_raw = obj.get("raw", {}).get("StatusTime")
+    try:
+        completed_dt = datetime.datetime.fromisoformat(status_time_raw)
+        if completed_dt.tzinfo is None:
+            completed_dt = completed_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+    except (ValueError, TypeError):
+        completed_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id FROM trip_stops
+            WHERE trip_id = %s AND stop_type = 'выгрузка' AND status = 'ожидание'
+            ORDER BY sequence LIMIT 1
+            """,
+            (trip_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "no_pending_stop"}
+
+    stop_id = row[0]
+    result = db_complete_stop(trip_id, stop_id, completed_dt, None)
+    return {
+        "trip_id": trip_id, "board_number": board_number, "action": "closed_stop",
+        "stop_id": stop_id, "completed_at": completed_dt.isoformat(),
+        "trip_closed": result["trip_closed"] if result else None,
+    }
+
+
+def biglock_sync_all_active_trips():
+    trips = db_get_active_trips_with_board()
+    results = []
+    for t in trips:
+        try:
+            results.append(biglock_sync_trip_removal(t["id"], t["board_number"]))
+        except Exception as e:
+            results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
+    return results
+
+
 def biglock_create_subscription(object_id, consumer_id="BigBlock", sub_type="LockGuardEvents"):
     """Подписывает нас на события конкретного охраняемого объекта -
     после этого BigLock должен сам присылать события навешивания/
@@ -2893,6 +2966,15 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_biglock_subscribe()
             return
 
+        if path == "/biglock/sync-now":
+            try:
+                results = biglock_sync_all_active_trips()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(results), "results": results})
+            return
+
         m = TRIP_CLOSE_RE.match(path)
         if m:
             self._handle_close_trip(int(m.group(1)))
@@ -3320,8 +3402,23 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(result)
 
 
+def _biglock_background_sync_loop(interval_seconds=300):
+    while True:
+        time.sleep(interval_seconds)
+        try:
+            if os.environ.get("BIGLOCK_LOGIN") and os.environ.get("BIGLOCK_PASSWORD"):
+                results = biglock_sync_all_active_trips()
+                closed = [r for r in results if r.get("action") == "closed_stop"]
+                if closed:
+                    print(f"[biglock-sync] обработано рейсов: {len(results)}, закрыто точек: {len(closed)}")
+        except Exception as e:
+            print("[biglock-sync] ошибка фоновой синхронизации:", e)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+    sync_thread = threading.Thread(target=_biglock_background_sync_loop, daemon=True)
+    sync_thread.start()
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Сервер запущен на порту {port}")
     server.serve_forever()
