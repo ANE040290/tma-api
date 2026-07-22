@@ -236,7 +236,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
   .panel { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px; }
-  .table-scroll table { min-width: 900px; }
+  .table-scroll table { min-width: 600px; }
+  #tab-trips .table-scroll table { min-width: 0; width: 100%; table-layout: fixed; }
   .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 12px; color: #666; }
@@ -456,7 +457,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="table-scroll">
     <table>
       <thead><tr>
-        <th>№</th><th>Номер борта</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Трекер</th><th>Закладка</th><th>Отправление</th><th>Назначения</th><th>Навешена</th><th>Снято</th><th>Статус</th><th></th>
+        <th>№ / Борт</th><th>Устройства</th><th>Маршрут</th><th>Даты</th><th>Статус</th><th></th>
       </tr></thead>
       <tbody id="trips-body"></tbody>
     </table>
@@ -789,25 +790,30 @@ async function loadTrips() {
     }
 
     const mainDeviceCells = editingDevice ? `
-      <td><input id="edit-ezpu-${t.id}" value="${t.ezpu_serial || ''}" style="width:100px" onclick="event.stopPropagation()"></td>
-      <td style="color:#bbb">—</td>
-      <td><input id="edit-tracker-${t.id}" value="${t.tracker_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
-      <td><input id="edit-lock-${t.id}" value="${t.lock_serial || ''}" style="width:80px" onclick="event.stopPropagation()"></td>
+      <td>
+        <input id="edit-ezpu-${t.id}" placeholder="ЭЗПУ" value="${t.ezpu_serial || ''}" style="width:90px; margin-bottom:3px" onclick="event.stopPropagation()"><br>
+        <input id="edit-tracker-${t.id}" placeholder="Трекер" value="${t.tracker_serial || ''}" style="width:90px; margin-bottom:3px" onclick="event.stopPropagation()"><br>
+        <input id="edit-lock-${t.id}" placeholder="Закладка" value="${t.lock_serial || ''}" style="width:90px" onclick="event.stopPropagation()">
+      </td>
     ` : `
-      <td>${t.ezpu_serial || '—'}</td>
-      <td style="color:#bbb">—</td>
-      <td>${t.tracker_serial || '—'}</td>
-      <td>${t.lock_serial || '—'}</td>
+      <td style="font-size:12px; line-height:1.6">
+        ЭЗПУ: ${t.ezpu_serial || '—'}<br>
+        Трекер: ${t.tracker_serial || '—'}<br>
+        Закладка: ${t.lock_serial || '—'}
+      </td>
     `;
 
     mainRow.innerHTML = `
-      <td>${t.id}</td>
-      <td>${t.board_number || '—'}</td>
+      <td>${t.id}<br><span style="color:#999; font-size:12px">${t.board_number || '—'}</span></td>
       ${mainDeviceCells}
-      <td>${pickupsList}</td>
-      <td>${dropoffsList}</td>
-      <td>${fmtDate(t.hang_datetime)}</td>
-      <td>${t.removal_datetime ? fmtDate(t.removal_datetime) : '—'}</td>
+      <td style="font-size:12px">
+        <div><b>Откуда:</b></div>${pickupsList}
+        <div style="margin-top:4px"><b>Куда:</b></div>${dropoffsList}
+      </td>
+      <td style="font-size:12px">
+        Навешена:<br>${fmtDate(t.hang_datetime)}<br>
+        Снято:<br>${t.removal_datetime ? fmtDate(t.removal_datetime) : '—'}
+      </td>
       <td><span class="trip-status ${statusClass(t.status)}">${t.status}</span></td>
       <td class="actions-cell">${mainActions.join('')}</td>
     `;
@@ -839,15 +845,9 @@ async function loadTrips() {
 
       tr.innerHTML = `
         <td>${num}</td>
-        <td></td>
-        <td>${t.ezpu_serial || '—'}</td>
-        <td>${zpuCell(leg, editingZpu, zpuStopId)}</td>
-        <td>${t.tracker_serial || '—'}</td>
-        <td>${t.lock_serial || '—'}</td>
-        <td>${leg.from}</td>
-        <td>${leg.to}</td>
-        <td></td>
-        <td>${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '—'}</td>
+        <td style="font-size:12px">ЗПУ: ${zpuCell(leg, editingZpu, zpuStopId)}</td>
+        <td>${leg.from} → ${leg.to}</td>
+        <td style="font-size:12px">${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : ''}</td>
         <td>${leg.toStop
           ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>'
           : ''}</td>
