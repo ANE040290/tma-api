@@ -1933,6 +1933,29 @@ def db_get_act(act_id):
         conn.close()
 
 
+def db_list_raw_events(source=None, limit=20):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        query = "SELECT id, source, event_type, external_id, event_dt, raw_payload, processed, created_at FROM raw_events WHERE 1=1"
+        params = []
+        if source:
+            query += " AND source = %s"
+            params.append(source)
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+        cur.execute(query, params)
+        return [
+            {
+                "id": r[0], "source": r[1], "event_type": r[2], "external_id": r[3],
+                "event_dt": r[4], "raw_payload": r[5], "processed": r[6], "created_at": r[7],
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
 def db_list_acts(limit=100):
     conn = get_connection()
     try:
@@ -2639,6 +2662,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"count": len(acts), "acts": acts})
+            return
+
+        if path == "/raw-events":
+            source = qs.get("source", [None])[0]
+            try:
+                limit = int(qs.get("limit", ["20"])[0])
+            except ValueError:
+                limit = 20
+            try:
+                events = db_list_raw_events(source=source, limit=limit)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(events), "events": events})
             return
 
         if path == "/reports/ezpu-billing":
