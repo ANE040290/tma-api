@@ -395,8 +395,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <input id="tf-client" placeholder="JTI">
       </div>
       <button onclick="loadTrips()">Найти</button>
-      <button class="secondary" onclick="openTripForm()" style="margin-left:auto">+ Новый рейс</button>
+      <button class="secondary" onclick="document.getElementById('trip-import-input').click()" style="margin-left:auto">Загрузить файл</button>
+      <input type="file" id="trip-import-input" accept=".xlsx" style="display:none" onchange="handleImportFile(event)">
+      <button class="secondary" onclick="openTripForm()">+ Новый рейс</button>
     </div>
+  </div>
+
+  <div class="panel" id="import-result-panel" style="display:none">
+    <button class="close-btn" onclick="document.getElementById('import-result-panel').style.display='none'">×</button>
+    <h3>Результат загрузки файла</h3>
+    <div style="color:#888; font-size:13px; margin-bottom:10px">Подрядчик по умолчанию: ТОО ТК Мегаполис Казахстан</div>
+    <div id="import-result-body"></div>
   </div>
 
   <div class="panel" id="trip-form-panel" style="display:none">
@@ -1311,6 +1320,44 @@ async function loadReportDetail() {
   });
   document.getElementById('report-total').textContent =
     'Итого: ' + data.total_amount.toLocaleString('ru-RU') + ' тенге (' + data.rows.length + ' рейсов)';
+}
+
+function handleImportFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async function() {
+    const base64 = reader.result.split(',')[1];
+    const panel = document.getElementById('import-result-panel');
+    const body = document.getElementById('import-result-body');
+    panel.style.display = 'block';
+    body.innerHTML = 'Загрузка и разбор файла...';
+    panel.scrollIntoView({behavior: 'smooth'});
+
+    const r = await fetch('/trips/import-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        filename: file.name,
+        content_base64: base64,
+        contractor: 'ТОО ТК Мегаполис Казахстан',
+      }),
+    });
+    const data = await r.json();
+    if (r.status !== 201) {
+      body.innerHTML = '<div style="color:#991b1b">Ошибка: ' + (data.error || 'неизвестная ошибка') + '</div>';
+      return;
+    }
+    body.innerHTML = `<div style="margin-bottom:8px">Всего строк: ${data.count} · Создано рейсов: ${data.created}</div>` +
+      data.results.map(res => {
+        const color = res.status === 'created' ? '#166534' : (res.status === 'skipped' ? '#92400e' : '#991b1b');
+        const detail = res.status === 'created' ? ('id ' + res.id) : (res.reason || res.error || '');
+        return `<div style="color:${color}; font-size:13px; padding:2px 0">№ ${res.board_number}: ${res.status} ${detail}</div>`;
+      }).join('');
+    loadTrips();
+  };
+  reader.readAsDataURL(file);
+  event.target.value = '';
 }
 
 loadDevices();
@@ -2251,6 +2298,97 @@ def biglock_guarded_object_status(native_id, obj_type="Auto"):
     }
 
 
+# ---------- Импорт файла рейсов (напр. от Мегаполиса) через дашборд ----------
+
+def _import_parse_date(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, (datetime.datetime, datetime.date)):
+        return datetime.datetime(raw.year, raw.month, raw.day)
+    raw = str(raw).strip()
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _import_split_destinations(raw):
+    raw = str(raw or "").strip()
+    if not raw:
+        return []
+    if "-" in raw:
+        parts = raw.split("-")
+    else:
+        parts = raw.split()
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _import_group_rows(ws):
+    trips = []
+    current = None
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        board_number, date_raw, warehouse, destination = (row + (None, None, None, None))[:4]
+        if board_number:
+            if current:
+                trips.append(current)
+            current = {
+                "board_number": str(board_number).strip(),
+                "date": _import_parse_date(date_raw),
+                "warehouses": [],
+                "destination": destination,
+            }
+        if current and warehouse:
+            current["warehouses"].append(str(warehouse).strip())
+    if current:
+        trips.append(current)
+    return trips
+
+
+def import_trips_from_xlsx(file_bytes, contractor, source_filename="import.xlsx"):
+    import io
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    ws = wb.active
+    parsed_trips = _import_group_rows(ws)
+
+    results = []
+    for trip in parsed_trips:
+        dest_points = _import_split_destinations(trip["destination"])
+        hang_dt = trip["date"]
+        if hang_dt and hang_dt.tzinfo is None:
+            hang_dt = hang_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+
+        payload = {
+            "client": None,
+            "contractor": contractor,
+            "board_number": trip["board_number"],
+            "pickups": trip["warehouses"],
+            "dropoffs": dest_points,
+            "ezpu_serial": None,
+            "tracker_serial": None,
+            "lock_serial": None,
+            "zpu_number": None,
+            "origin_city": None,
+            "hang_datetime": hang_dt or datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5))),
+            "notes": f"Импортировано из файла {source_filename}",
+        }
+
+        if not payload["pickups"] or not payload["dropoffs"]:
+            results.append({"board_number": trip["board_number"], "status": "skipped", "reason": "нет склада или пункта выгрузки"})
+            continue
+
+        try:
+            trip_id = db_create_trip(payload)
+            results.append({"board_number": trip["board_number"], "status": "created", "id": trip_id})
+        except Exception as e:
+            results.append({"board_number": trip["board_number"], "status": "error", "error": str(e)})
+
+    return results
+
+
 def db_get_active_trips_with_board():
     conn = get_connection()
     try:
@@ -2975,6 +3113,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"count": len(results), "results": results})
             return
 
+        if path == "/trips/import-file":
+            self._handle_import_trips_file()
+            return
+
         m = TRIP_CLOSE_RE.match(path)
         if m:
             self._handle_close_trip(int(m.group(1)))
@@ -3400,6 +3542,39 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json(result)
+
+    def _handle_import_trips_file(self):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        content_b64 = body.get("content_base64")
+        filename = body.get("filename") or "import.xlsx"
+        contractor = (body.get("contractor") or "").strip() or "ТОО ТК Мегаполис Казахстан"
+
+        if not content_b64:
+            self._send_json({"error": "Укажите content_base64"}, status=400)
+            return
+
+        import base64
+        try:
+            file_bytes = base64.b64decode(content_b64)
+        except Exception:
+            self._send_json({"error": "Не удалось декодировать файл (некорректный base64)"}, status=400)
+            return
+
+        try:
+            results = import_trips_from_xlsx(file_bytes, contractor, source_filename=filename)
+        except Exception as e:
+            self._send_json({"error": f"Не удалось разобрать файл: {e}"}, status=500)
+            return
+
+        created = [r for r in results if r["status"] == "created"]
+        self._send_json({
+            "count": len(results), "created": len(created), "results": results,
+        }, status=201)
 
 
 def _biglock_background_sync_loop(interval_seconds=300):
