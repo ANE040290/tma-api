@@ -2153,7 +2153,8 @@ def biglock_device_status(case_id):
     device_id = device.get("DeviceId")
 
     packets_data = _biglock_post(opener, "/api/devicepackets/search", {
-        "DeviceId": device_id, "Limit": 1, "SkipCount": True, "OrderBy": "TimeDesc",
+        "DeviceId": device_id, "Type": "Hello", "Limit": 1, "SkipCount": True,
+        "ExtraFields": "Data", "OrderBy": "TimeDesc",
     })
     items = packets_data.get("Items", [])
     device_point_id = items[0].get("DevicePointId") if items else None
