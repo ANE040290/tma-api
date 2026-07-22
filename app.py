@@ -1501,6 +1501,100 @@ def db_mark_stop_arrived(trip_id, stop_id, arrived_dt):
         conn.close()
 
 
+def db_auto_mark_arrival_by_board(board_number, arrived_dt, location_hint=None):
+    """Для автоматики с Wialon: по номеру борта находит активный рейс
+    (status='в пути') и ближайшую ещё не пройденную точку выгрузки,
+    проставляет ей arrived_at. Если указан location_hint (название
+    геозоны/базы) - сначала пробует найти точку с похожим названием,
+    иначе берёт просто самую раннюю необработанную точку выгрузки."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id FROM trips
+            WHERE board_number = %s AND status = 'в пути'
+            ORDER BY hang_datetime DESC LIMIT 1
+            """,
+            (board_number,),
+        )
+        trip = cur.fetchone()
+        if not trip:
+            return {"matched": False, "reason": f"Нет активного рейса с бортом {board_number}"}
+        trip_id = trip[0]
+
+        stop_id = None
+        if location_hint:
+            cur.execute(
+                """
+                SELECT id FROM trip_stops
+                WHERE trip_id = %s AND stop_type = 'выгрузка' AND arrived_at IS NULL
+                  AND location ILIKE %s
+                ORDER BY sequence LIMIT 1
+                """,
+                (trip_id, f"%{location_hint}%"),
+            )
+            row = cur.fetchone()
+            if row:
+                stop_id = row[0]
+
+        if stop_id is None:
+            cur.execute(
+                """
+                SELECT id FROM trip_stops
+                WHERE trip_id = %s AND stop_type = 'выгрузка' AND arrived_at IS NULL
+                ORDER BY sequence LIMIT 1
+                """,
+                (trip_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                stop_id = row[0]
+
+        if stop_id is None:
+            return {"matched": False, "reason": f"У рейса {trip_id} нет необработанных точек выгрузки"}
+
+        cur.execute(
+            "UPDATE trip_stops SET arrived_at = %s WHERE id = %s",
+            (arrived_dt, stop_id),
+        )
+        conn.commit()
+        return {"matched": True, "trip_id": trip_id, "stop_id": stop_id}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_store_wialon_webhook_event(raw_body):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        external_id = None
+        event_type = None
+        if isinstance(raw_body, dict):
+            event_type = raw_body.get("Type") or raw_body.get("type") or raw_body.get("eventType")
+            raw_id = raw_body.get("Id") or raw_body.get("id")
+            try:
+                external_id = int(raw_id) if raw_id is not None else None
+            except (ValueError, TypeError):
+                external_id = None
+        cur.execute(
+            """
+            INSERT INTO raw_events (source, event_type, external_id, event_dt, raw_payload, processed)
+            VALUES ('wialon', %s, %s, now(), %s, false)
+            """,
+            (event_type, external_id, json.dumps(raw_body, ensure_ascii=False)),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def db_complete_stop(trip_id, stop_id, completed_dt, location_override):
     conn = get_connection()
     try:
@@ -2041,18 +2135,17 @@ def biglock_device_status(case_id):
     """Проверяет текущий статус конкретной пломбы (по CaseId, напр.
     GNS10759) через связку electricdevices -> devicepackets: находит
     внутренний DeviceId, затем смотрит последний 'пакет' устройства -
-    если у него есть DevicePointId, значит устройство сейчас 'поставлено
-    на охрану' (навешено); отсутствие/смена DevicePointId - снято."""
+    если в нём есть LockId ИЛИ DevicePointId, устройство сейчас
+    'поставлено на охрану' (навешено); оба пустые - свободно."""
     opener = _biglock_opener()
 
-    devices_data = _biglock_post(opener, "/api/electricdevices/search", {"SkipCount": True})
-    device = None
-    for item in devices_data.get("Items", []):
-        if item.get("CaseId") == case_id:
-            device = item
-            break
-    if not device:
+    devices_data = _biglock_post(opener, "/api/electricdevices/search", {
+        "CaseId": case_id, "SkipCount": True,
+    })
+    items_dev = devices_data.get("Items", [])
+    if not items_dev:
         return {"error": f"Устройство с CaseId={case_id} не найдено в BigLock", "case_id": case_id}
+    device = items_dev[0]
 
     device_id = device.get("DeviceId")
 
@@ -2061,13 +2154,15 @@ def biglock_device_status(case_id):
     })
     items = packets_data.get("Items", [])
     device_point_id = items[0].get("DevicePointId") if items else None
+    lock_id = items[0].get("LockId") if items else None
 
     return {
         "case_id": case_id,
         "device_id": device_id,
         "client_name": device.get("ClientName"),
-        "on_guard": device_point_id is not None,
+        "on_guard": bool(lock_id or device_point_id),
         "device_point_id": device_point_id,
+        "lock_id": lock_id,
         "last_packet_raw": items[0] if items else None,
     }
 
@@ -2608,6 +2703,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json(result)
+            return
+
+        if path == "/wialon/webhook":
+            board = qs.get("board", [None])[0]
+            zone = qs.get("zone", [None])[0]
+            time_raw = qs.get("time", [None])[0]
+
+            if time_raw:
+                try:
+                    arrived_dt = datetime.datetime.fromtimestamp(
+                        int(time_raw), tz=datetime.timezone(datetime.timedelta(hours=5))
+                    )
+                except (ValueError, TypeError):
+                    arrived_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+            else:
+                arrived_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+
+            try:
+                db_store_wialon_webhook_event({"board": board, "zone": zone, "time": time_raw, "query": self.path})
+            except Exception as e:
+                print("Ошибка сохранения Wialon webhook:", e)
+
+            if not board:
+                self._send_json({"status": "logged_no_board"})
+                return
+
+            try:
+                result = db_auto_mark_arrival_by_board(board, arrived_dt, location_hint=zone)
+            except Exception as e:
+                self._send_json({"status": "logged", "match_error": str(e)})
+                return
+
+            self._send_json({"status": "ok", "match": result})
             return
 
         if path == "/biglock/device-status":
