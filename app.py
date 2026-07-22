@@ -2156,13 +2156,11 @@ def biglock_device_sessions(ezpu_serial, limit=5000, codes=None, page_size=200, 
 
 def biglock_device_status(case_id):
     """Проверяет текущий статус конкретной пломбы (по CaseId, напр.
-    GNS10759) через связку electricdevices -> devicepackets: находит
-    внутренний DeviceId, затем смотрит последний 'пакет' устройства.
-    ВАЖНО (проверено на реальных данных): LockId в пакете остаётся
-    заполненным даже после снятия пломбы - это просто привязка 'какой
-    физический замок стоит на устройстве', не признак активной охраны.
-    Единственный подтверждённый рабочий индикатор - DevicePointId:
-    есть значение - на охране, null - снято/свободно."""
+    GNS10759) через связку electricdevices -> devicepackets - точная
+    логика подтверждена самой поддержкой BigLock: находит DeviceId,
+    смотрит последний пакет любого типа, и если в нём заполнен
+    LockId ИЛИ DevicePointId - устройство на охране, оба пустые -
+    свободно."""
     opener = _biglock_opener()
 
     devices_data = _biglock_post(opener, "/api/electricdevices/search", {
@@ -2176,8 +2174,7 @@ def biglock_device_status(case_id):
     device_id = device.get("DeviceId")
 
     packets_data = _biglock_post(opener, "/api/devicepackets/search", {
-        "DeviceId": device_id, "Type": "Hello", "Limit": 1, "SkipCount": True,
-        "ExtraFields": "Data", "OrderBy": "TimeDesc",
+        "DeviceId": device_id, "Limit": 1, "SkipCount": True, "OrderBy": "TimeDesc",
     })
     items = packets_data.get("Items", [])
     device_point_id = items[0].get("DevicePointId") if items else None
@@ -2187,7 +2184,7 @@ def biglock_device_status(case_id):
         "case_id": case_id,
         "device_id": device_id,
         "client_name": device.get("ClientName"),
-        "on_guard": device_point_id is not None,
+        "on_guard": bool(lock_id or device_point_id),
         "device_point_id": device_point_id,
         "lock_id": lock_id,
         "last_packet_raw": items[0] if items else None,
