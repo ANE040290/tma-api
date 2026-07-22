@@ -2130,6 +2130,47 @@ def biglock_guarded_object_status(native_id, obj_type="Auto"):
     }
 
 
+def biglock_create_subscription(object_id, consumer_id="BigBlock", sub_type="LockGuardEvents"):
+    """Подписывает нас на события конкретного охраняемого объекта -
+    после этого BigLock должен сам присылать события навешивания/
+    снятия (адрес назначения настраивается на стороне BigLock под
+    этим ConsumerId, не через этот вызов)."""
+    opener = _biglock_opener()
+    return _biglock_post(opener, "/api/externalsubscriptions", {
+        "Type": sub_type, "ConsumerId": consumer_id, "ObjectId": str(object_id),
+    })
+
+
+def db_store_biglock_webhook_event(raw_body):
+    """Сохраняет любое входящее событие от BigLock как есть - формат
+    ещё не подтверждён, поэтому просто складываем сырые данные,
+    разбор сделаем по факту, глядя на реальные пришедшие данные."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        external_id = raw_body.get("Id") if isinstance(raw_body, dict) else None
+        try:
+            external_id = int(external_id) if external_id is not None else None
+        except (ValueError, TypeError):
+            external_id = None
+        event_type = None
+        if isinstance(raw_body, dict):
+            event_type = raw_body.get("Type") or raw_body.get("EventType") or raw_body.get("TemplateCode")
+        cur.execute(
+            """
+            INSERT INTO raw_events (source, event_type, external_id, event_dt, raw_payload, processed)
+            VALUES ('biglock', %s, %s, now(), %s, false)
+            """,
+            (event_type, external_id, json.dumps(raw_body, ensure_ascii=False)),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # ---------- Отчёт по ЭЗПУ для выставления счёта (расчёт суток) ----------
 
 DEFAULT_EZPU_RATE = 4060
@@ -2678,6 +2719,14 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_create_act()
             return
 
+        if path == "/biglock/webhook":
+            self._handle_biglock_webhook()
+            return
+
+        if path == "/biglock/subscribe":
+            self._handle_biglock_subscribe()
+            return
+
         m = TRIP_CLOSE_RE.match(path)
         if m:
             self._handle_close_trip(int(m.group(1)))
@@ -3063,6 +3112,46 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"id": act_id, "act_number": act_number, "status": "created"}, status=201)
+
+    def _handle_biglock_webhook(self):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            # даже если тело не JSON - отвечаем 200, чтобы BigLock не считал вебхук сломанным
+            self._send_json({"status": "ignored_not_json"}, status=200)
+            return
+
+        try:
+            db_store_biglock_webhook_event(body)
+        except Exception as e:
+            # логируем, но всё равно отвечаем 200 - иначе BigLock может отключить подписку
+            print("Ошибка сохранения BigLock webhook:", e)
+            self._send_json({"status": "error_logged"}, status=200)
+            return
+
+        self._send_json({"status": "ok"}, status=200)
+
+    def _handle_biglock_subscribe(self):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        object_id = body.get("object_id")
+        if not object_id:
+            self._send_json({"error": "Укажите object_id"}, status=400)
+            return
+
+        consumer_id = body.get("consumer_id") or "BigBlock"
+
+        try:
+            result = biglock_create_subscription(object_id, consumer_id=consumer_id)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        self._send_json(result)
 
 
 if __name__ == "__main__":
