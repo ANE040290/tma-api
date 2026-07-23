@@ -725,6 +725,16 @@ function switchTab(name) {
 }
 
 let editingTrips = new Set();
+let expandedTrips = new Set();
+
+function toggleLegs(id) {
+  if (expandedTrips.has(id)) {
+    expandedTrips.delete(id);
+  } else {
+    expandedTrips.add(id);
+  }
+  loadTrips();
+}
 
 let editingZpuStops = new Set();
 
@@ -809,6 +819,7 @@ async function loadTrips() {
       <td style="font-size:12px">
         <div><b>Откуда:</b></div>${pickupsList}
         <div style="margin-top:4px"><b>Куда:</b></div>${dropoffsList}
+        ${legs.length > 1 ? `<button class="secondary" style="margin-top:6px; font-size:11px" onclick="event.stopPropagation(); toggleLegs(${t.id})">${expanded ? '▼ Скрыть плечи' : '▶ Показать плечи (' + legs.length + ')'}</button>` : ''}
       </td>
       <td style="font-size:12px">
         Навешена:<br>${fmtDate(t.hang_datetime)}<br>
@@ -819,10 +830,12 @@ async function loadTrips() {
     `;
     body.appendChild(mainRow);
 
-    // ---------- Плечи маршрута ----------
+    // ---------- Плечи маршрута (свёрнуты по умолчанию) ----------
+    const expanded = expandedTrips.has(t.id);
     legs.forEach((leg, i) => {
       const tr = document.createElement('tr');
-      tr.className = 'device-row trip-leg-row';
+      tr.className = 'device-row trip-leg-row legs-of-' + t.id;
+      tr.style.display = expanded ? '' : 'none';
       tr.onclick = () => openTripDetail(t.id);
       const num = `${t.id}.${i + 1}`;
       const legDone = leg.toStop && leg.toStop.status === 'исполнено';
@@ -2340,7 +2353,7 @@ def _import_group_rows(ws):
                 "destination": destination,
             }
         if current and warehouse:
-            current["warehouses"].append(str(warehouse).strip())
+            current["warehouses"].extend(_import_split_destinations(warehouse))
     if current:
         trips.append(current)
     return trips
