@@ -2,7 +2,7 @@
 API для учёта ЭЗПУ и трекеров - замена ручного ввода в Excel.
 
 Написано на чистом Python: http.server (встроен в Python) + pg8000
-(чистый Python-драйвер Postgres, без C-расширений). Ничего не требует 
+(чистый Python-драйвер Postgres, без C-расширений). Ничего не требует
 компиляции - работает на любой версии Python, включая самые новые.
 
 Эндпоинты:
@@ -767,6 +767,7 @@ async function loadTrips() {
     if (legs.length === 0) {
       legs.push({from: '—', to: '—', fromStop: null, toStop: null});
     }
+    const expanded = expandedTrips.has(t.id);
 
     const pickupsList = (t.pickups && t.pickups.length ? t.pickups : [])
       .slice().sort((a, b) => a.sequence - b.sequence)
@@ -831,7 +832,6 @@ async function loadTrips() {
     body.appendChild(mainRow);
 
     // ---------- Плечи маршрута (свёрнуты по умолчанию) ----------
-    const expanded = expandedTrips.has(t.id);
     legs.forEach((leg, i) => {
       const tr = document.createElement('tr');
       tr.className = 'device-row trip-leg-row legs-of-' + t.id;
