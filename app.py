@@ -2415,12 +2415,17 @@ def biglock_sync_trip_removal(trip_id, board_number):
         return {"trip_id": trip_id, "board_number": board_number, "action": "still_locked"}
 
     status_time_raw = obj.get("raw", {}).get("StatusTime")
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
     try:
         completed_dt = datetime.datetime.fromisoformat(status_time_raw)
         if completed_dt.tzinfo is None:
-            completed_dt = completed_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+            # BigLock отдаёт время в UTC без метки пояса - переводим в Алматы (+5),
+            # а не просто приклеиваем метку +5 к сырому UTC-значению
+            completed_dt = completed_dt.replace(tzinfo=datetime.timezone.utc).astimezone(almaty_tz)
+        else:
+            completed_dt = completed_dt.astimezone(almaty_tz)
     except (ValueError, TypeError):
-        completed_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+        completed_dt = datetime.datetime.now(almaty_tz)
 
     conn = get_connection()
     try:
