@@ -39,6 +39,7 @@ DEVICE_RE = re.compile(r"^/devices/([^/]+)$")
 DEVICE_HISTORY_RE = re.compile(r"^/devices/([^/]+)/history$")
 TRIP_RE = re.compile(r"^/trips/(\d+)$")
 TRIP_CLOSE_RE = re.compile(r"^/trips/(\d+)/close$")
+TRIP_DELETE_RE = re.compile(r"^/trips/(\d+)/delete$")
 TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
 TRIP_STOP_ARRIVE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/arrive$")
@@ -285,6 +286,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .trip-leg-row td:first-child { padding-left: 20px; color: #b0b4bb; }
   .trip-leg-row .trip-status { font-size: 11px; }
   .trip-leg-row:hover td { background: #fafafa; }
+  .trip-leg-row.leg-done td { background: #f0fdf4; }
+  .trip-leg-row.leg-done:hover td { background: #dcfce7; }
   .btn-success { background: #16a34a; color: #fff; border: none; font-weight: 600; }
   .btn-success:hover { background: #15803d; }
   .waypoint-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
@@ -798,6 +801,7 @@ async function loadTrips() {
       } else if (t.status === 'в пути') {
         mainActions.push(`<button class="secondary" onclick="event.stopPropagation(); closeTrip(${t.id})">Закрыть вручную</button>`);
       }
+      mainActions.push(`<button class="secondary" style="color:#991b1b" onclick="event.stopPropagation(); deleteTrip(${t.id}, '${t.board_number || t.id}')">Удалить</button>`);
     }
 
     const mainDeviceCells = editingDevice ? `
@@ -834,11 +838,11 @@ async function loadTrips() {
     // ---------- Плечи маршрута (свёрнуты по умолчанию) ----------
     legs.forEach((leg, i) => {
       const tr = document.createElement('tr');
-      tr.className = 'device-row trip-leg-row legs-of-' + t.id;
+      const legDone = leg.toStop && leg.toStop.status === 'исполнено';
+      tr.className = 'device-row trip-leg-row legs-of-' + t.id + (legDone ? ' leg-done' : '');
       tr.style.display = expanded ? '' : 'none';
       tr.onclick = () => openTripDetail(t.id);
       const num = `${t.id}.${i + 1}`;
-      const legDone = leg.toStop && leg.toStop.status === 'исполнено';
       const legStatus = leg.toStop ? leg.toStop.status : '—';
       const zpuStopId = leg.fromStop ? leg.fromStop.id : null;
       const editingZpu = zpuStopId && editingZpuStops.has(zpuStopId);
@@ -1097,6 +1101,17 @@ async function closeTrip(id) {
   } else {
     const data = await r.json();
     alert(data.error || 'Ошибка закрытия рейса');
+  }
+}
+
+async function deleteTrip(id, label) {
+  if (!confirm('Удалить рейс № ' + label + '? Это действие необратимо.')) return;
+  const r = await fetch('/trips/' + id + '/delete', { method: 'POST' });
+  if (r.status === 200) {
+    loadTrips();
+  } else {
+    const data = await r.json();
+    alert(data.error || 'Ошибка удаления рейса');
   }
 }
 
@@ -1835,6 +1850,26 @@ def db_list_trips(status=None, client=None, limit=200):
         conn.close()
 
 
+def db_delete_trip(trip_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM trips WHERE id = %s", (trip_id,))
+        if not cur.fetchone():
+            return False
+        # операции, связанные с рейсом, сохраняем в истории устройства -
+        # просто отвязываем их от удаляемого рейса
+        cur.execute("UPDATE operations SET trip_id = NULL WHERE trip_id = %s", (trip_id,))
+        cur.execute("DELETE FROM trips WHERE id = %s", (trip_id,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def db_close_trip(trip_id, removal_dt, location):
     conn = get_connection()
     try:
@@ -2544,38 +2579,57 @@ def db_get_ezpu_billing_report(contractor_name, year, month, rate=DEFAULT_EZPU_R
 
         cur.execute(
             """
-            SELECT t.id, t.board_number, d.serial_number, t.hang_datetime, t.removal_datetime,
-                   (SELECT location FROM trip_stops WHERE trip_id = t.id ORDER BY sequence LIMIT 1) AS origin,
-                   (SELECT location FROM trip_stops WHERE trip_id = t.id ORDER BY sequence DESC LIMIT 1) AS destination
+            SELECT t.id, t.board_number, d.serial_number, t.hang_datetime,
+                   ts.sequence, ts.location, ts.completed_at
             FROM trips t
             JOIN devices d ON d.id = t.ezpu_device_id
             JOIN parties p ON p.id = t.contractor_id
-            WHERE p.name = %s AND t.status = 'снят'
-              AND t.hang_datetime >= %s AND t.hang_datetime < %s
-              AND t.removal_datetime IS NOT NULL
-            ORDER BY t.hang_datetime
+            JOIN trip_stops ts ON ts.trip_id = t.id
+            WHERE p.name = %s AND t.hang_datetime >= %s AND t.hang_datetime < %s
+            ORDER BY t.id, ts.sequence
             """,
             (contractor_name, period_from, period_to),
         )
-        rows = []
-        total_amount = 0
-        for i, r in enumerate(cur.fetchall(), start=1):
-            trip_id, board, serial, hang_dt, removal_dt, origin, destination = r
-            days = _billing_days(hang_dt, removal_dt)
+        rows_raw = cur.fetchall()
+    finally:
+        conn.close()
+
+    # группируем строки по рейсу
+    trips_map = {}
+    for trip_id, board, serial, hang_dt, seq, location, completed_at in rows_raw:
+        info = trips_map.setdefault(trip_id, {"board": board, "serial": serial, "hang_dt": hang_dt, "stops": []})
+        info["stops"].append({"seq": seq, "location": location, "completed_at": completed_at})
+
+    # каждое ПРОЙДЕННОЕ плечо (пара соседних точек, у которых обе отметки
+    # исполнены) - отдельная строка отчёта, даже если весь рейс ещё не закрыт
+    rows = []
+    total_amount = 0
+    num = 1
+    for trip_id, info in trips_map.items():
+        stops = sorted(info["stops"], key=lambda s: s["seq"])
+        for i in range(len(stops) - 1):
+            a, b = stops[i], stops[i + 1]
+            if a["completed_at"] is None or b["completed_at"] is None:
+                continue
+            days = _billing_days(a["completed_at"], b["completed_at"])
             amount = days * rate
             total_amount += amount
             rows.append({
-                "num": i, "trip_id": trip_id, "board_number": board, "ezpu_serial": serial,
-                "origin": origin, "destination": destination,
-                "hang_datetime": hang_dt, "removal_datetime": removal_dt,
+                "num": num, "trip_id": trip_id, "board_number": info["board"], "ezpu_serial": info["serial"],
+                "origin": a["location"], "destination": b["location"],
+                "hang_datetime": a["completed_at"], "removal_datetime": b["completed_at"],
                 "days": days, "rate": rate, "amount": amount,
             })
-        return {
-            "contractor": contractor_name, "year": year, "month": month, "rate": rate,
-            "rows": rows, "total_amount": total_amount,
-        }
-    finally:
-        conn.close()
+            num += 1
+
+    rows.sort(key=lambda r: r["hang_datetime"])
+    for i, r in enumerate(rows, start=1):
+        r["num"] = i
+
+    return {
+        "contractor": contractor_name, "year": year, "month": month, "rate": rate,
+        "rows": rows, "total_amount": total_amount,
+    }
 
 
 _DOCX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -3140,6 +3194,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_close_trip(int(m.group(1)))
             return
 
+        m = TRIP_DELETE_RE.match(path)
+        if m:
+            self._handle_delete_trip(int(m.group(1)))
+            return
+
         m = TRIP_ASSIGN_RE.match(path)
         if m:
             self._handle_assign_device(int(m.group(1)))
@@ -3289,6 +3348,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"id": trip_id, "status": "created"}, status=201)
+
+    def _handle_delete_trip(self, trip_id):
+        try:
+            ok = db_delete_trip(trip_id)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+        if not ok:
+            self._send_json({"error": f"Рейс {trip_id} не найден"}, status=404)
+            return
+        self._send_json({"id": trip_id, "status": "deleted"})
 
     def _handle_close_trip(self, trip_id):
         try:
