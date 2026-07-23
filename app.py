@@ -2449,6 +2449,68 @@ def db_get_active_trips_with_board():
         conn.close()
 
 
+def db_get_planned_trips_with_board():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, board_number FROM trips WHERE status = 'запланирован' AND board_number IS NOT NULL"
+        )
+        return [{"id": r[0], "board_number": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def biglock_find_device_for_board(board_number, limit=500):
+    """Ищет самое свежее событие постановки на охрану для этого борта
+    и вытаскивает оттуда ЭЗПУ (ElectricDevice.CaseId) и ЗПУ
+    (MechanicalDevice.CaseId), если найдено."""
+    result = biglock_events_for_object(board_number, limit=limit, codes=["LockEvent"])
+    events = result.get("events", [])
+    if not events:
+        return None
+    latest = events[0]  # события идут по убыванию времени (самое новое первое)
+    if not latest.get("ezpu_serial"):
+        return None
+    return {
+        "ezpu_serial": latest.get("ezpu_serial"),
+        "zpu_number": latest.get("zpu_number"),
+        "event_time": latest.get("create_time"),
+    }
+
+
+def biglock_sync_trip_assignment(trip_id, board_number):
+    """Для рейса в статусе 'запланирован': ищет в BigLock, не поставили
+    ли уже реально пломбу на этот борт, и если да - сам назначает
+    ЭЗПУ/ЗПУ рейсу с реальным временем постановки."""
+    found = biglock_find_device_for_board(board_number)
+    if not found:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+    try:
+        assign_dt = datetime.datetime.fromisoformat(found["event_time"])
+        if assign_dt.tzinfo is None:
+            assign_dt = assign_dt.replace(tzinfo=datetime.timezone.utc).astimezone(almaty_tz)
+        else:
+            assign_dt = assign_dt.astimezone(almaty_tz)
+    except (ValueError, TypeError):
+        assign_dt = datetime.datetime.now(almaty_tz)
+
+    try:
+        db_assign_trip_device(
+            trip_id, found["ezpu_serial"], None, None, found["zpu_number"], assign_dt,
+        )
+    except Exception as e:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "error", "error": str(e)}
+
+    return {
+        "trip_id": trip_id, "board_number": board_number, "action": "assigned",
+        "ezpu_serial": found["ezpu_serial"], "zpu_number": found["zpu_number"],
+        "assigned_at": assign_dt.isoformat(),
+    }
+
+
 def biglock_sync_trip_removal(trip_id, board_number):
     """Проверяет статус борта в BigLock; если объект свободен (Free) -
     закрывает ближайшую необработанную точку выгрузки рейса, используя
@@ -2503,13 +2565,22 @@ def biglock_sync_trip_removal(trip_id, board_number):
 
 
 def biglock_sync_all_active_trips():
-    trips = db_get_active_trips_with_board()
     results = []
-    for t in trips:
+
+    planned_trips = db_get_planned_trips_with_board()
+    for t in planned_trips:
+        try:
+            results.append(biglock_sync_trip_assignment(t["id"], t["board_number"]))
+        except Exception as e:
+            results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
+
+    active_trips = db_get_active_trips_with_board()
+    for t in active_trips:
         try:
             results.append(biglock_sync_trip_removal(t["id"], t["board_number"]))
         except Exception as e:
             results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
+
     return results
 
 
