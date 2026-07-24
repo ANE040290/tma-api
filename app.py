@@ -827,15 +827,15 @@ async function loadTrips() {
         <input id="edit-lock-${t.id}" placeholder="Закладка" value="${t.lock_serial || ''}" style="width:90px" onclick="event.stopPropagation()">
       </td>
     ` : `
-      <td style="font-size:12px; line-height:1.6">
-        ЭЗПУ: ${t.ezpu_serial || '—'}<br>
-        Трекер: ${t.tracker_serial || '—'}<br>
-        Закладка: ${t.lock_serial || '—'}
+      <td style="font-size:13px; line-height:1.7">
+        <span style="color:#888">ЭЗПУ:</span> <b style="color:#111; font-size:15px">${t.ezpu_serial || '—'}</b><br>
+        <span style="color:#888">Трекер:</span> <b style="color:#111; font-size:15px">${t.tracker_serial || '—'}</b><br>
+        <span style="color:#888">Закладка:</span> <b style="color:#111; font-size:15px">${t.lock_serial || '—'}</b>
       </td>
     `;
 
     mainRow.innerHTML = `
-      <td>${t.id}<br><span style="color:#999; font-size:12px">${t.board_number || '—'}</span></td>
+      <td>${t.id}<br><span style="color:#111; font-size:16px; font-weight:700">${t.board_number || '—'}</span></td>
       ${mainDeviceCells}
       <td style="font-size:12px">
         <div><b>Откуда:</b></div>${pickupsList}
@@ -878,7 +878,7 @@ async function loadTrips() {
 
       tr.innerHTML = `
         <td>${num}</td>
-        <td style="font-size:12px">ЗПУ: ${zpuCell(leg, editingZpu, zpuStopId)}</td>
+        <td style="font-size:12px"><span style="color:#888">ЗПУ:</span> <b style="color:#111; font-size:14px">${zpuCell(leg, editingZpu, zpuStopId)}</b></td>
         <td>${leg.from} → ${leg.to}</td>
         <td style="font-size:12px">${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : ''}</td>
         <td>${leg.toStop
