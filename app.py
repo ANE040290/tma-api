@@ -2482,14 +2482,28 @@ def biglock_find_device_for_board(board_number, limit=500):
 def biglock_sync_trip_assignment(trip_id, board_number):
     """Для рейса в статусе 'запланирован': ищет в BigLock, не поставили
     ли уже реально пломбу на этот борт, и если да - сам назначает
-    ЭЗПУ/ЗПУ рейсу с реальным временем постановки."""
+    ЭЗПУ/ЗПУ рейсу с реальным временем постановки.
+
+    Время берём из StatusTime объекта охраны (момент смены статуса на
+    Locked) - оно точно совпадает с 'Скомплектован'/'Установлен' в
+    интерфейсе BigLock. Событие (LockEvent) используем только чтобы
+    узнать САМИ номера ЭЗПУ/ЗПУ - его время для навешивания не берём,
+    оно может быть позже (случайное срабатывание акселерометра и т.п.)."""
     found = biglock_find_device_for_board(board_number)
     if not found:
         return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
 
     almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+
+    status_data = biglock_guarded_object_status(board_number)
+    objects = status_data.get("objects", [])
+    status_time_raw = None
+    if objects and objects[0].get("status") == "Locked":
+        status_time_raw = objects[0].get("raw", {}).get("StatusTime")
+
+    time_source = status_time_raw or found["event_time"]
     try:
-        assign_dt = datetime.datetime.fromisoformat(found["event_time"])
+        assign_dt = datetime.datetime.fromisoformat(time_source)
         if assign_dt.tzinfo is None:
             assign_dt = assign_dt.replace(tzinfo=datetime.timezone.utc).astimezone(almaty_tz)
         else:
