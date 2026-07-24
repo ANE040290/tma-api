@@ -1759,32 +1759,31 @@ def db_complete_stop(trip_id, stop_id, completed_dt, location_override):
         )
 
         trip_closed = False
-        if stop_type == "выгрузка":
+        cur.execute(
+            "SELECT COUNT(*) FROM trip_stops WHERE trip_id = %s AND status != 'исполнено'",
+            (trip_id,),
+        )
+        remaining = cur.fetchone()[0]
+        if remaining == 0:
+            cur.execute("SELECT ezpu_device_id FROM trips WHERE id = %s", (trip_id,))
+            ezpu_id = cur.fetchone()[0]
             cur.execute(
-                "SELECT COUNT(*) FROM trip_stops WHERE trip_id = %s AND stop_type = 'выгрузка' AND status != 'исполнено'",
-                (trip_id,),
+                "UPDATE trips SET status = 'снят', removal_datetime = %s, updated_at = now() WHERE id = %s",
+                (completed_dt, trip_id),
             )
-            remaining = cur.fetchone()[0]
-            if remaining == 0:
-                cur.execute("SELECT ezpu_device_id FROM trips WHERE id = %s", (trip_id,))
-                ezpu_id = cur.fetchone()[0]
+            if ezpu_id:
                 cur.execute(
-                    "UPDATE trips SET status = 'снят', removal_datetime = %s, updated_at = now() WHERE id = %s",
-                    (completed_dt, trip_id),
+                    """
+                    INSERT INTO operations (device_id, trip_id, operation_type, location, operation_dt)
+                    VALUES (%s, %s, 'снятие', %s, %s)
+                    """,
+                    (ezpu_id, trip_id, location, completed_dt),
                 )
-                if ezpu_id:
-                    cur.execute(
-                        """
-                        INSERT INTO operations (device_id, trip_id, operation_type, location, operation_dt)
-                        VALUES (%s, %s, 'снятие', %s, %s)
-                        """,
-                        (ezpu_id, trip_id, location, completed_dt),
-                    )
-                    cur.execute(
-                        "UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now() WHERE id = %s",
-                        (location, completed_dt, ezpu_id),
-                    )
-                trip_closed = True
+                cur.execute(
+                    "UPDATE devices SET current_location = %s, last_operation_at = %s, updated_at = now() WHERE id = %s",
+                    (location, completed_dt, ezpu_id),
+                )
+            trip_closed = True
 
         conn.commit()
         return {"trip_closed": trip_closed}
@@ -2726,7 +2725,7 @@ def biglock_sync_trip_removal(trip_id, board_number):
         cur.execute(
             """
             SELECT id FROM trip_stops
-            WHERE trip_id = %s AND stop_type = 'выгрузка' AND status = 'ожидание'
+            WHERE trip_id = %s AND status = 'ожидание'
             ORDER BY sequence LIMIT 1
             """,
             (trip_id,),
