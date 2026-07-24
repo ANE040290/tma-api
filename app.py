@@ -2150,6 +2150,94 @@ def db_list_acts(limit=100):
 
 # ---------- Клиент BigLock API (только stdlib, без aiohttp) ----------
 
+# ---------- Клиент Wialon (только stdlib, по образцу рабочего tma_alert) ----------
+
+WIALON_BASE_URL = os.environ.get("WIALON_BASE_URL", "https://hst-api.wialon.com")
+
+
+def _wialon_call(svc, params, sid=None):
+    url = f"{WIALON_BASE_URL}/wialon/ajax.html"
+    params_str = json.dumps(params, ensure_ascii=False)
+    body = f"svc={svc}&params={params_str}"
+    if sid:
+        body += f"&sid={sid}"
+    req = urllib.request.Request(
+        url, data=body.encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read())
+    if "error" in result:
+        raise RuntimeError(f"Wialon ошибка {result['error']} ({svc})")
+    return result
+
+
+def _wialon_login():
+    token = os.environ.get("WIALON_TOKEN")
+    operate_as = os.environ.get("WIALON_OPERATE_AS", "")
+    if not token:
+        raise RuntimeError("WIALON_TOKEN не задан в переменных окружения")
+    params = {"token": token}
+    if operate_as:
+        params["operateAs"] = operate_as
+    url = f"{WIALON_BASE_URL}/wialon/ajax.html"
+    body = f"svc=token/login&params={json.dumps(params, ensure_ascii=False)}"
+    req = urllib.request.Request(
+        url, data=body.encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read())
+    if "error" in result:
+        raise RuntimeError(f"Wialon ошибка авторизации {result['error']}")
+    sid = result.get("eid")
+    if not sid:
+        raise RuntimeError("Wialon не вернул sid (eid) при авторизации")
+    return sid
+
+
+_UNIT_NAME_RE = re.compile(r"^\d+--(\d+)/")
+
+
+def wialon_get_units():
+    """Все объекты Wialon с текущей позицией/скоростью; парсит номер
+    борта из имени формата 'ЦИФРЫ--НОМЕР_БОРТА/маршрут'."""
+    sid = _wialon_login()
+    resp = _wialon_call("core/search_items", {
+        "spec": {
+            "itemsType": "avl_unit", "propName": "sys_name", "propValueMask": "*",
+            "sortType": "sys_name", "propType": "property",
+        },
+        "force": 1, "flags": 0x00000001 | 0x00000100 | 0x00000400, "from": 0, "to": 0,
+    }, sid=sid)
+
+    units = []
+    for item in resp.get("items", []):
+        name = item.get("nm", "")
+        m = _UNIT_NAME_RE.match(name)
+        board_number = m.group(1) if m else None
+        pos = item.get("pos") or {}
+        lmsg = item.get("lmsg") or {}
+        units.append({
+            "id": item["id"], "name": name, "board_number": board_number,
+            "lat": pos.get("y"), "lon": pos.get("x"), "speed": pos.get("s"),
+            "last_seen": lmsg.get("t"),
+        })
+    return units
+
+
+def wialon_get_unit_messages(unit_id, since_ts, limit=50):
+    sid = _wialon_login()
+    resp = _wialon_call("messages/load_interval", {
+        "itemId": unit_id, "timeFrom": since_ts, "timeTo": int(time.time()),
+        "flags": 0x0400, "flagsMask": 0x0400, "loadCount": limit,
+    }, sid=sid)
+    return resp.get("messages", [])
+
+
+
+
+
 BIGLOCK_BASE_URL = "https://www.biglock.pro"
 
 
@@ -3314,6 +3402,45 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._send_json({"status": "ok", "match": result})
+            return
+
+        if path == "/wialon/units":
+            try:
+                units = wialon_get_units()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            board = qs.get("board", [None])[0]
+            if board:
+                units = [u for u in units if u.get("board_number") == board]
+            self._send_json({"count": len(units), "units": units})
+            return
+
+        if path == "/wialon/messages":
+            board = qs.get("board", [None])[0]
+            unit_id = qs.get("unit_id", [None])[0]
+            try:
+                hours = int(qs.get("hours", ["48"])[0])
+            except ValueError:
+                hours = 48
+            since_ts = int(time.time()) - hours * 3600
+
+            try:
+                if not unit_id:
+                    if not board:
+                        self._send_json({"error": "Укажите board или unit_id"}, status=400)
+                        return
+                    units = wialon_get_units()
+                    match = next((u for u in units if u.get("board_number") == board), None)
+                    if not match:
+                        self._send_json({"error": f"Борт {board} не найден в Wialon"}, status=404)
+                        return
+                    unit_id = match["id"]
+                messages = wialon_get_unit_messages(int(unit_id), since_ts)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"unit_id": unit_id, "count": len(messages), "messages": messages})
             return
 
         if path == "/biglock/device-status":
