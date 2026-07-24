@@ -2235,6 +2235,21 @@ def wialon_get_unit_messages(unit_id, since_ts, limit=50, flags=0x0400, flags_ma
     return resp.get("messages", [])
 
 
+def wialon_get_resources_with_notifications():
+    """Ищет ресурсы (аккаунты) Wialon и запрашивает с флагом 0x2000000
+    (уведомления) - чтобы увидеть настроенные уведомления, включая их
+    условия (геозона, тип триггера и т.д.)."""
+    sid = _wialon_login()
+    resp = _wialon_call("core/search_items", {
+        "spec": {
+            "itemsType": "avl_resource", "propName": "sys_name", "propValueMask": "*",
+            "sortType": "sys_name", "propType": "property",
+        },
+        "force": 1, "flags": 0x2000000 | 1, "from": 0, "to": 0,
+    }, sid=sid)
+    return resp.get("items", [])
+
+
 
 
 
@@ -3402,6 +3417,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._send_json({"status": "ok", "match": result})
+            return
+
+        if path == "/wialon/notifications":
+            name_filter = qs.get("name", [None])[0]
+            try:
+                resources = wialon_get_resources_with_notifications()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            result = []
+            for r in resources:
+                ntfs = r.get("ntfs") or {}
+                for ntf_id, ntf in ntfs.items():
+                    ntf_name = ntf.get("n", "")
+                    if name_filter and name_filter.lower() not in ntf_name.lower():
+                        continue
+                    result.append({"resource_id": r.get("id"), "resource_name": r.get("nm"), "notification_id": ntf_id, "raw": ntf})
+            self._send_json({"count": len(result), "notifications": result})
             return
 
         if path == "/wialon/units":
