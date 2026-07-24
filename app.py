@@ -1145,8 +1145,8 @@ async function saveDevice(id) {
   const ezpu = document.getElementById('edit-ezpu-' + id).value.trim();
   const tracker = document.getElementById('edit-tracker-' + id).value.trim();
   const lock = document.getElementById('edit-lock-' + id).value.trim();
-  if (!ezpu && !tracker) {
-    alert('Укажите хотя бы ЭЗПУ или трекер');
+  if (!ezpu && !tracker && !lock) {
+    alert('Укажите хотя бы ЭЗПУ, трекер или закладку');
     return;
   }
   const r = await fetch('/trips/' + id + '/assign-device', {
@@ -3855,8 +3855,8 @@ class Handler(BaseHTTPRequestHandler):
         lock_serial = (body.get("lock_serial") or "").strip() or None
         contractor = (body.get("contractor") or "").strip() or None
 
-        if not ezpu_serial and not tracker_serial:
-            self._send_json({"error": "Укажите ezpu_serial или tracker_serial"}, status=400)
+        if not ezpu_serial and not tracker_serial and not lock_serial:
+            self._send_json({"error": "Укажите ezpu_serial, tracker_serial или lock_serial"}, status=400)
             return
 
         if contractor == self.MEGAPOLIS_NAME and not tracker_serial:
