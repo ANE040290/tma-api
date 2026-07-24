@@ -557,6 +557,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3 id="reports-detail-title">Отчёт</h3>
     <div class="filters">
       <div class="field">
+        <label>Тип отчёта</label>
+        <select id="report-type" onchange="onReportTypeChange()">
+          <option value="billing">По ЭЗПУ (О_ТКМПК)</option>
+          <option value="movement">Движение бортов</option>
+        </select>
+      </div>
+      <div class="field">
         <label>Месяц</label>
         <select id="report-month"></select>
       </div>
@@ -564,19 +571,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <label>Год</label>
         <input id="report-year" type="number" style="width:90px">
       </div>
-      <div class="field">
+      <div class="field" id="report-rate-field">
         <label>Ставка, тенге/сутки</label>
         <input id="report-rate" type="number" value="4060" style="width:100px">
       </div>
       <button onclick="loadReportDetail()">Показать</button>
     </div>
-    <div class="table-scroll">
+    <div class="table-scroll" id="report-billing-view">
     <table>
       <thead><tr>
         <th>№</th><th>Борт</th><th>ЭЗПУ</th><th>Откуда</th><th>Куда</th>
         <th>Навешивание</th><th>Снятие</th><th>Дней</th><th>Ставка</th><th>Сумма</th>
       </tr></thead>
       <tbody id="report-rows-body"></tbody>
+    </table>
+    </div>
+    <div class="table-scroll" id="report-movement-view" style="display:none">
+    <table>
+      <thead><tr>
+        <th>№</th><th>Борт</th><th>Склад</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Откуда</th><th>Куда</th>
+        <th>Навешено</th><th>Прибыл на базу</th><th>Снято</th><th>Примечание</th>
+      </tr></thead>
+      <tbody id="report-movement-body"></tbody>
     </table>
     </div>
     <div id="report-total" style="margin-top:14px; font-weight:600; font-size:15px"></div>
@@ -1315,8 +1331,25 @@ function closeReportDetail() {
   document.getElementById('reports-detail-panel').style.display = 'none';
 }
 
+function onReportTypeChange() {
+  const type = document.getElementById('report-type').value;
+  document.getElementById('report-billing-view').style.display = type === 'billing' ? '' : 'none';
+  document.getElementById('report-movement-view').style.display = type === 'movement' ? '' : 'none';
+  document.getElementById('report-rate-field').style.display = type === 'billing' ? '' : 'none';
+  document.getElementById('report-total').textContent = '';
+}
+
 async function loadReportDetail() {
   if (!currentReportCompany) return;
+  const type = document.getElementById('report-type').value;
+  if (type === 'movement') {
+    await loadBoardMovementReport();
+  } else {
+    await loadBillingReport();
+  }
+}
+
+async function loadBillingReport() {
   const year = document.getElementById('report-year').value;
   const month = document.getElementById('report-month').value;
   const rate = document.getElementById('report-rate').value;
@@ -1348,6 +1381,40 @@ async function loadReportDetail() {
   });
   document.getElementById('report-total').textContent =
     'Итого: ' + data.total_amount.toLocaleString('ru-RU') + ' тенге (' + data.rows.length + ' рейсов)';
+}
+
+async function loadBoardMovementReport() {
+  const year = document.getElementById('report-year').value;
+  const month = document.getElementById('report-month').value;
+  const params = new URLSearchParams({contractor: currentReportCompany, year, month});
+  const r = await fetch('/reports/board-movement?' + params.toString());
+  const data = await r.json();
+  const body = document.getElementById('report-movement-body');
+  body.innerHTML = '';
+  if (!data.rows || !data.rows.length) {
+    body.innerHTML = '<tr><td colspan="11" style="color:#888">Нет данных за этот период</td></tr>';
+    document.getElementById('report-total').textContent = '';
+    return;
+  }
+  data.rows.forEach(row => {
+    const noteColor = row.note === 'позднее прибытие' ? '#991b1b' : (row.note === 'ок' ? '#166534' : '#888');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${row.num}</td>
+      <td>${row.board_number || '—'}</td>
+      <td>${row.warehouse || '—'}</td>
+      <td>${row.ezpu_serial || '—'}</td>
+      <td>${row.zpu_number || '—'}</td>
+      <td>${row.origin || '—'}</td>
+      <td>${row.destination || '—'}</td>
+      <td>${fmtDate(row.hang_datetime)}</td>
+      <td>${fmtDate(row.arrival_datetime)}</td>
+      <td>${fmtDate(row.removal_datetime)}</td>
+      <td style="color:${noteColor}">${row.note || '—'}</td>
+    `;
+    body.appendChild(tr);
+  });
+  document.getElementById('report-total').textContent = 'Всего строк: ' + data.rows.length;
 }
 
 function handleImportFile(event) {
@@ -2671,6 +2738,74 @@ def _billing_days(hang_dt, removal_dt, cutoff_hour=11):
     return max(days, 1)
 
 
+def db_get_board_movement_report(contractor_name, year, month, arrival_cutoff_hour=15):
+    """Отчёт 'Движение бортов': по каждому плечу маршрута показывает
+    склад отгрузки, ЭЗПУ/ЗПУ, откуда-куда, время навешивания, время
+    прибытия на базу (фиксируется через Wialon, поле arrived_at) и
+    время снятия пломбы (фиксируется через BigLock/вручную, поле
+    completed_at). Примечание: если прибыл до 15:00 - 'ок', позже -
+    'позднее прибытие' (правило разгрузки в тот же/на следующий день)."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        period_from = datetime.date(year, month, 1)
+        period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
+
+        cur.execute(
+            """
+            SELECT t.id, t.board_number, t.warehouse, d.serial_number, t.hang_datetime,
+                   ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at
+            FROM trips t
+            LEFT JOIN devices d ON d.id = t.ezpu_device_id
+            JOIN parties p ON p.id = t.contractor_id
+            JOIN trip_stops ts ON ts.trip_id = t.id
+            WHERE p.name = %s AND t.hang_datetime >= %s AND t.hang_datetime < %s
+            ORDER BY t.id, ts.sequence
+            """,
+            (contractor_name, period_from, period_to),
+        )
+        rows_raw = cur.fetchall()
+    finally:
+        conn.close()
+
+    trips_map = {}
+    for trip_id, board, warehouse, serial, hang_dt, seq, location, zpu, arrived_at, completed_at in rows_raw:
+        info = trips_map.setdefault(trip_id, {
+            "board": board, "warehouse": warehouse, "serial": serial, "hang_dt": hang_dt, "stops": [],
+        })
+        info["stops"].append({
+            "seq": seq, "location": location, "zpu": zpu,
+            "arrived_at": arrived_at, "completed_at": completed_at,
+        })
+
+    rows = []
+    num = 1
+    for trip_id, info in trips_map.items():
+        stops = sorted(info["stops"], key=lambda s: s["seq"])
+        for i in range(len(stops) - 1):
+            a, b = stops[i], stops[i + 1]
+            hang_time = a["completed_at"] or (info["hang_dt"] if i == 0 else None)
+
+            note = ""
+            if b["arrived_at"]:
+                note = "ок" if b["arrived_at"].hour < arrival_cutoff_hour else "позднее прибытие"
+
+            rows.append({
+                "num": num, "trip_id": trip_id, "board_number": info["board"],
+                "warehouse": info["warehouse"], "ezpu_serial": info["serial"], "zpu_number": a["zpu"],
+                "origin": a["location"], "destination": b["location"],
+                "hang_datetime": hang_time, "arrival_datetime": b["arrived_at"],
+                "removal_datetime": b["completed_at"], "note": note,
+            })
+            num += 1
+
+    rows.sort(key=lambda r: r["hang_datetime"] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+    for i, r in enumerate(rows, start=1):
+        r["num"] = i
+
+    return {"contractor": contractor_name, "year": year, "month": month, "rows": rows}
+
+
 def db_get_ezpu_billing_report(contractor_name, year, month, rate=DEFAULT_EZPU_RATE):
     conn = get_connection()
     try:
@@ -3076,6 +3211,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 report = db_get_ezpu_billing_report(contractor, year, month, rate)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(report)
+            return
+
+        if path == "/reports/board-movement":
+            contractor = qs.get("contractor", [None])[0]
+            year = qs.get("year", [None])[0]
+            month = qs.get("month", [None])[0]
+            if not contractor or not year or not month:
+                self._send_json({"error": "Укажите contractor, year, month"}, status=400)
+                return
+            try:
+                year = int(year)
+                month = int(month)
+            except ValueError:
+                self._send_json({"error": "year/month должны быть числами"}, status=400)
+                return
+            try:
+                report = db_get_board_movement_report(contractor, year, month)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
