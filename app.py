@@ -2235,17 +2235,16 @@ def wialon_get_unit_messages(unit_id, since_ts, limit=50, flags=0x0400, flags_ma
     return resp.get("messages", [])
 
 
-def wialon_get_resources_with_notifications():
-    """Ищет ресурсы (аккаунты) Wialon и запрашивает с флагом 0x2000000
-    (уведомления) - чтобы увидеть настроенные уведомления, включая их
-    условия (геозона, тип триггера и т.д.)."""
+def wialon_get_resources_with_notifications(flags=0x2000000 | 1):
+    """Ищет ресурсы (аккаунты) Wialon с указанным флагом - разные
+    флаги открывают разные наборы данных (уведомления, геозоны и т.д.)."""
     sid = _wialon_login()
     resp = _wialon_call("core/search_items", {
         "spec": {
             "itemsType": "avl_resource", "propName": "sys_name", "propValueMask": "*",
             "sortType": "sys_name", "propType": "property",
         },
-        "force": 1, "flags": 0x2000000 | 1, "from": 0, "to": 0,
+        "force": 1, "flags": flags, "from": 0, "to": 0,
     }, sid=sid)
     return resp.get("items", [])
 
@@ -3421,11 +3420,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/wialon/notifications":
             name_filter = qs.get("name", [None])[0]
+            raw_mode = qs.get("raw", [None])[0]
+            flags_raw = qs.get("flags", [None])[0]
             try:
-                resources = wialon_get_resources_with_notifications()
+                flags = int(flags_raw, 0) if flags_raw else (0x2000000 | 1)
+            except ValueError:
+                flags = 0x2000000 | 1
+            try:
+                resources = wialon_get_resources_with_notifications(flags=flags)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
+
+            if raw_mode:
+                self._send_json({"count": len(resources), "resources_raw": resources})
+                return
+
             result = []
             for r in resources:
                 ntfs = r.get("ntfs") or {}
