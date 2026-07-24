@@ -2226,11 +2226,11 @@ def wialon_get_units():
     return units
 
 
-def wialon_get_unit_messages(unit_id, since_ts, limit=50):
+def wialon_get_unit_messages(unit_id, since_ts, limit=50, flags=0x0400, flags_mask=0x0400):
     sid = _wialon_login()
     resp = _wialon_call("messages/load_interval", {
         "itemId": unit_id, "timeFrom": since_ts, "timeTo": int(time.time()),
-        "flags": 0x0400, "flagsMask": 0x0400, "loadCount": limit,
+        "flags": flags, "flagsMask": flags_mask, "loadCount": limit,
     }, sid=sid)
     return resp.get("messages", [])
 
@@ -3419,11 +3419,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/wialon/messages":
             board = qs.get("board", [None])[0]
             unit_id = qs.get("unit_id", [None])[0]
+            raw = qs.get("raw", [None])[0]
             try:
                 hours = int(qs.get("hours", ["48"])[0])
             except ValueError:
                 hours = 48
+            try:
+                limit = int(qs.get("limit", ["100"])[0])
+            except ValueError:
+                limit = 100
             since_ts = int(time.time()) - hours * 3600
+            flags = 0 if raw else 0x0400
+            flags_mask = 0 if raw else 0x0400
 
             try:
                 if not unit_id:
@@ -3436,7 +3443,7 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json({"error": f"Борт {board} не найден в Wialon"}, status=404)
                         return
                     unit_id = match["id"]
-                messages = wialon_get_unit_messages(int(unit_id), since_ts)
+                messages = wialon_get_unit_messages(int(unit_id), since_ts, limit=limit, flags=flags, flags_mask=flags_mask)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
