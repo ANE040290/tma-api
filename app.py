@@ -1530,8 +1530,8 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
 
         if was_planned and stop_row:
             cur.execute(
-                "UPDATE trip_stops SET status = 'исполнено', completed_at = %s WHERE id = %s",
-                (assign_dt, stop_row[0]),
+                "UPDATE trip_stops SET status = 'исполнено', completed_at = %s, zpu_number = COALESCE(%s, zpu_number) WHERE id = %s",
+                (assign_dt, zpu_number, stop_row[0]),
             )
 
         if was_planned and ezpu_id:
@@ -2571,10 +2571,26 @@ def biglock_sync_trip_removal(trip_id, board_number):
 
     stop_id = row[0]
     result = db_complete_stop(trip_id, stop_id, completed_dt, None)
+    trip_closed = result["trip_closed"] if result else None
+
+    # если рейс не закрылся целиком (это промежуточное плечо) - машина едет
+    # дальше, и на этом же борту может уже стоять НОВАЯ пломба (частичная
+    # выгрузка -> новый ЗПУ). Проверяем и сразу проставляем на эту же точку -
+    # она станет стартом следующего плеча.
+    new_zpu_found = None
+    if not trip_closed:
+        found = biglock_find_device_for_board(board_number)
+        if found and found.get("zpu_number"):
+            try:
+                db_set_stop_zpu(trip_id, stop_id, found["zpu_number"])
+                new_zpu_found = found["zpu_number"]
+            except Exception:
+                pass
+
     return {
         "trip_id": trip_id, "board_number": board_number, "action": "closed_stop",
         "stop_id": stop_id, "completed_at": completed_dt.isoformat(),
-        "trip_closed": result["trip_closed"] if result else None,
+        "trip_closed": trip_closed, "next_leg_zpu": new_zpu_found,
     }
 
 
