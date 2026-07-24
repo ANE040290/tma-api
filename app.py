@@ -1628,12 +1628,25 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
 
 
 def db_mark_stop_arrived(trip_id, stop_id, arrived_dt):
+    """На машине едет несколько устройств (пломба, трекер) - каждое
+    может независимо сообщить о прибытии на базу. Записываем только
+    САМОЕ РАННЕЕ время: если отметка уже есть и она раньше новой -
+    не перезаписываем (более позднее уведомление от другого
+    устройства не должно затирать более точное раннее)."""
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
-            "UPDATE trip_stops SET arrived_at = %s WHERE id = %s AND trip_id = %s RETURNING id",
-            (arrived_dt, stop_id, trip_id),
+            """
+            UPDATE trip_stops
+            SET arrived_at = CASE
+                WHEN arrived_at IS NULL OR %s < arrived_at THEN %s
+                ELSE arrived_at
+            END
+            WHERE id = %s AND trip_id = %s
+            RETURNING id
+            """,
+            (arrived_dt, arrived_dt, stop_id, trip_id),
         )
         row = cur.fetchone()
         conn.commit()
@@ -1647,10 +1660,14 @@ def db_mark_stop_arrived(trip_id, stop_id, arrived_dt):
 
 def db_auto_mark_arrival_by_board(board_number, arrived_dt, location_hint=None):
     """Для автоматики с Wialon: по номеру борта находит активный рейс
-    (status='в пути') и ближайшую ещё не пройденную точку выгрузки,
-    проставляет ей arrived_at. Если указан location_hint (название
-    геозоны/базы) - сначала пробует найти точку с похожим названием,
-    иначе берёт просто самую раннюю необработанную точку выгрузки."""
+    (status='в пути') и сопоставляет геозону (location_hint) с одной
+    из ЗАПЛАНИРОВАННЫХ точек выгрузки ЭТОГО рейса. Если совпадения
+    нет - НЕ фиксируем прибытие (это может быть посторонний склад,
+    где машина просто стоит на охраняемой стоянке, а не пункт
+    маршрута) - специально без 'слепого' отката на первую попавшуюся
+    точку, чтобы такие стоянки не попадали в отчёт как часть маршрута.
+    На машине едет несколько устройств (пломба, трекер) - если оба
+    сообщат о прибытии, в отчёт попадёт САМОЕ РАННЕЕ время."""
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -1667,40 +1684,46 @@ def db_auto_mark_arrival_by_board(board_number, arrived_dt, location_hint=None):
             return {"matched": False, "reason": f"Нет активного рейса с бортом {board_number}"}
         trip_id = trip[0]
 
-        stop_id = None
-        if location_hint:
-            cur.execute(
-                """
-                SELECT id FROM trip_stops
-                WHERE trip_id = %s AND stop_type = 'выгрузка' AND arrived_at IS NULL
-                  AND location ILIKE %s
-                ORDER BY sequence LIMIT 1
-                """,
-                (trip_id, f"%{location_hint}%"),
-            )
-            row = cur.fetchone()
-            if row:
-                stop_id = row[0]
-
-        if stop_id is None:
-            cur.execute(
-                """
-                SELECT id FROM trip_stops
-                WHERE trip_id = %s AND stop_type = 'выгрузка' AND arrived_at IS NULL
-                ORDER BY sequence LIMIT 1
-                """,
-                (trip_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                stop_id = row[0]
-
-        if stop_id is None:
-            return {"matched": False, "reason": f"У рейса {trip_id} нет необработанных точек выгрузки"}
+        if not location_hint:
+            return {"matched": False, "reason": "Нет названия геозоны - не можем сверить с маршрутом"}
 
         cur.execute(
-            "UPDATE trip_stops SET arrived_at = %s WHERE id = %s",
-            (arrived_dt, stop_id),
+            """
+            SELECT id, location FROM trip_stops
+            WHERE trip_id = %s AND stop_type = 'выгрузка' AND arrived_at IS NULL
+            ORDER BY sequence
+            """,
+            (trip_id,),
+        )
+        pending = cur.fetchall()
+
+        hint_lower = location_hint.strip().lower()
+        stop_id = None
+        for sid, loc in pending:
+            loc_lower = (loc or "").strip().lower()
+            if not loc_lower:
+                continue
+            if loc_lower in hint_lower or hint_lower in loc_lower:
+                stop_id = sid
+                break
+
+        if stop_id is None:
+            return {
+                "matched": False,
+                "reason": f"Геозона '{location_hint}' не относится к точкам этого маршрута "
+                          f"(похоже на посторонний склад/стоянку) - прибытие не зафиксировано",
+            }
+
+        cur.execute(
+            """
+            UPDATE trip_stops
+            SET arrived_at = CASE
+                WHEN arrived_at IS NULL OR %s < arrived_at THEN %s
+                ELSE arrived_at
+            END
+            WHERE id = %s
+            """,
+            (arrived_dt, arrived_dt, stop_id),
         )
         conn.commit()
         return {"matched": True, "trip_id": trip_id, "stop_id": stop_id}
