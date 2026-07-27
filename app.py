@@ -2487,15 +2487,13 @@ def biglock_device_status(case_id):
 
 
 def biglock_lock_status(mechanical_case_id=None, native_id=None, client_id=None,
-                         is_released=None, limit=10, order_by="LockTimeDesc"):
+                         is_released=None, guarded_object_id=None, limit=10, order_by="LockTimeDesc"):
     """Самый прямой способ узнать навешивание/снятие: ищет записи
     LockedDevice - там сразу есть LockTime (навешено), ReleaseTime
-    (снято), IsReleased. Реально рабочие фильтры (подтверждено из
-    структуры меню самого BigLock): MechanicalDeviceCaseId (номер
-    разовой пломбы), ClientId (напр. 56 = ТОО Мегаполис КЗ),
-    IsReleased (false = ещё в рейсе, не снята). NativeId (номер
-    борта) и ElectricDeviceCaseId (серийник ЭЗПУ) BigLock тихо
-    игнорирует - ими не пользуемся."""
+    (снято), IsReleased. Реально рабочие фильтры: MechanicalDeviceCaseId
+    (номер разовой пломбы), ClientId, IsReleased, и GuardedObjectId
+    (внутренний ID объекта - НЕ то же самое, что NativeId/номер борта,
+    но его можно получить через guarded-object по NativeId)."""
     opener = _biglock_opener()
     payload = {"Limit": limit, "OrderBy": order_by}
     if mechanical_case_id:
@@ -2506,6 +2504,8 @@ def biglock_lock_status(mechanical_case_id=None, native_id=None, client_id=None,
         payload["ClientId"] = client_id
     if is_released is not None:
         payload["IsReleased"] = is_released
+    if guarded_object_id is not None:
+        payload["GuardedObjectId"] = guarded_object_id
     data = _biglock_post(opener, "/api/lockeddevices/search", payload)
     items = data.get("Items", [])
     return {
@@ -2681,20 +2681,40 @@ def biglock_list_all_electricdevices(limit=2000):
 
 
 def biglock_find_device_for_board(board_number, limit=3000):
-    """Ищет самое свежее событие постановки на охрану для этого борта
-    и вытаскивает оттуда ЭЗПУ (ElectricDevice.CaseId) и ЗПУ
-    (MechanicalDevice.CaseId), если найдено."""
-    result = biglock_events_for_object(board_number, limit=limit, codes=["LockEvent"])
-    events = result.get("events", [])
-    if not events:
+    """НАДЁЖНЫЙ способ (проверено на реальных данных): номер борта
+    (NativeId) -> guardedobjects/search даёт внутренний GuardedObjectId
+    -> lockeddevices/search с фильтром GuardedObjectId + IsReleased=false
+    даёт текущую активную запись с ElectricDeviceCaseId,
+    MechanicalDeviceCaseId и настоящим LockTime. Это то же самое, что
+    показывает карточка устройства в самом BigLock ('Скомплектован').
+    Старый способ (перебор событий уведомлений) ненадёжен - событие
+    может просто не попасть в поток, если рядом не было 'заметного'
+    срабатывания (акселерометр и т.п.), поэтому больше не используется
+    как основной путь."""
+    status = biglock_guarded_object_status(board_number)
+    objects = status.get("objects", [])
+    if not objects:
         return None
-    latest = events[0]  # события идут по убыванию времени (самое новое первое)
-    if not latest.get("ezpu_serial"):
+    guarded_object_id = objects[0].get("id")
+    if guarded_object_id is None:
+        return None
+
+    lock_status = biglock_lock_status(guarded_object_id=guarded_object_id, is_released=False, limit=5)
+    records = lock_status.get("records", [])
+    if not records:
+        return None
+
+    rec = records[0]
+    raw = rec.get("raw", {})
+    ezpu_serial = raw.get("ElectricDeviceCaseId")
+    zpu_number = raw.get("MechanicalDeviceCaseId")
+    lock_time = raw.get("LockTime") or rec.get("lock_time")
+    if not ezpu_serial:
         return None
     return {
-        "ezpu_serial": latest.get("ezpu_serial"),
-        "zpu_number": latest.get("zpu_number"),
-        "event_time": latest.get("create_time"),
+        "ezpu_serial": ezpu_serial,
+        "zpu_number": zpu_number,
+        "event_time": lock_time,
     }
 
 
