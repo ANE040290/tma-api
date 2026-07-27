@@ -2486,6 +2486,32 @@ def biglock_device_status(case_id):
     }
 
 
+def biglock_get_lock_by_id(lock_id):
+    """Подтверждённо рабочий способ (поймали в DevTools): прямой GET
+    к ресурсу конкретного замка по его внутреннему LockId. Даёт полный
+    актуальный набор: ElectricDeviceCaseId, MechanicalDeviceCaseId,
+    LockTime, GuardedObject.NativeId и т.д."""
+    opener = _biglock_opener()
+    url = f"{BIGLOCK_BASE_URL}/api/locks/{lock_id}"
+    req = urllib.request.Request(url, method="GET")
+    with opener.open(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def biglock_locks_search(guarded_object_id=None, is_released=None, limit=10, order_by="LockTimeDesc"):
+    """Пробуем ресурс /api/locks/search (не lockeddevices/search) -
+    раз прямой GET /api/locks/{id} подтверждённо работает и отдаёт
+    актуальные данные, вероятно есть парный рабочий поиск по этому же
+    ресурсу, в отличие от старого/нерабочего lockeddevices/search."""
+    opener = _biglock_opener()
+    payload = {"Limit": limit, "OrderBy": order_by}
+    if guarded_object_id is not None:
+        payload["GuardedObjectId"] = guarded_object_id
+    if is_released is not None:
+        payload["IsReleased"] = is_released
+    return _biglock_post(opener, "/api/locks/search", payload)
+
+
 def biglock_lock_status(mechanical_case_id=None, native_id=None, client_id=None,
                          is_released=None, guarded_object_id=None, limit=10, order_by="LockTimeDesc"):
     """Самый прямой способ узнать навешивание/снятие: ищет записи
@@ -3561,6 +3587,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"unit_id": unit_id, "count": len(messages), "messages": messages})
+            return
+
+        if path == "/biglock/lock-by-id":
+            lock_id = qs.get("lock_id", [None])[0]
+            if not lock_id:
+                self._send_json({"error": "Укажите lock_id"}, status=400)
+                return
+            try:
+                data = biglock_get_lock_by_id(lock_id)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(data)
+            return
+
+        if path == "/biglock/locks-search":
+            guarded_object_id = qs.get("guarded_object_id", [None])[0]
+            is_released_raw = qs.get("is_released", [None])[0]
+            is_released = None
+            if is_released_raw is not None:
+                is_released = is_released_raw.lower() == "true"
+            try:
+                data = biglock_locks_search(
+                    guarded_object_id=int(guarded_object_id) if guarded_object_id else None,
+                    is_released=is_released,
+                )
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(data)
             return
 
         if path == "/biglock/all-devices-raw":
