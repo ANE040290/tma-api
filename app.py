@@ -2707,16 +2707,15 @@ def biglock_list_all_electricdevices(limit=2000):
 
 
 def biglock_find_device_for_board(board_number, limit=3000):
-    """НАДЁЖНЫЙ способ (проверено на реальных данных): номер борта
-    (NativeId) -> guardedobjects/search даёт внутренний GuardedObjectId
-    -> lockeddevices/search с фильтром GuardedObjectId + IsReleased=false
-    даёт текущую активную запись с ElectricDeviceCaseId,
-    MechanicalDeviceCaseId и настоящим LockTime. Это то же самое, что
-    показывает карточка устройства в самом BigLock ('Скомплектован').
-    Старый способ (перебор событий уведомлений) ненадёжен - событие
-    может просто не попасть в поток, если рядом не было 'заметного'
-    срабатывания (акселерометр и т.п.), поэтому больше не используется
-    как основной путь."""
+    """ПОДТВЕРЖДЁННО РАБОЧИЙ способ (проверено на реальных данных,
+    поймано через DevTools): номер борта (NativeId) ->
+    guardedobjects/search даёт внутренний GuardedObjectId ->
+    /api/locks/search (НЕ lockeddevices/search - тот вообще не
+    фильтрует и отдаёт мусор!) с фильтром GuardedObjectId +
+    IsReleased=false даёт текущую активную запись с
+    ElectricDeviceCaseId, MechanicalDeviceCaseId и настоящим LockTime.
+    Это то же самое, что показывает карточка устройства в самом
+    BigLock ('Скомплектован')."""
     status = biglock_guarded_object_status(board_number)
     objects = status.get("objects", [])
     if not objects:
@@ -2725,16 +2724,15 @@ def biglock_find_device_for_board(board_number, limit=3000):
     if guarded_object_id is None:
         return None
 
-    lock_status = biglock_lock_status(guarded_object_id=guarded_object_id, is_released=False, limit=5)
-    records = lock_status.get("records", [])
-    if not records:
+    data = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=False, limit=5)
+    items = data.get("Items", [])
+    if not items:
         return None
 
-    rec = records[0]
-    raw = rec.get("raw", {})
-    ezpu_serial = raw.get("ElectricDeviceCaseId")
-    zpu_number = raw.get("MechanicalDeviceCaseId")
-    lock_time = raw.get("LockTime") or rec.get("lock_time")
+    rec = items[0]
+    ezpu_serial = rec.get("ElectricDeviceCaseId")
+    zpu_number = rec.get("MechanicalDeviceCaseId")
+    lock_time = rec.get("LockTime")
     if not ezpu_serial:
         return None
     return {
