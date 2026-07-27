@@ -1556,15 +1556,26 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT status FROM trips WHERE id = %s", (trip_id,))
+        cur.execute("SELECT status, ezpu_device_id FROM trips WHERE id = %s", (trip_id,))
         row = cur.fetchone()
         if not row:
             return None
-        was_planned = row[0] == "запланирован"
+        had_ezpu_before = row[1] is not None
+
+        ezpu_id = _get_or_create_device(cur, ezpu_serial, "ezpu") if ezpu_serial else None
+        tracker_id = _get_or_create_device(cur, tracker_serial, "tracker") if tracker_serial else None
+        lock_id = _get_or_create_device(cur, lock_serial, "lock") if lock_serial else None
+
+        # Это первое РЕАЛЬНОЕ назначение ЭЗПУ - неважно, что статус рейса
+        # мог уже стать 'в пути' раньше (например, если сперва ввели
+        # только закладку без ЭЗПУ). Именно от этого момента, а не от
+        # статуса рейса, должны зависеть время навешивания, закрытие
+        # первой точки погрузки и запись операции навешивания.
+        is_first_ezpu_assignment = (not had_ezpu_before) and (ezpu_id is not None)
 
         stop_row = None
         location = None
-        if was_planned:
+        if is_first_ezpu_assignment:
             cur.execute(
                 """
                 SELECT id, location FROM trip_stops
@@ -1575,10 +1586,6 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
             )
             stop_row = cur.fetchone()
             location = stop_row[1] if stop_row else None
-
-        ezpu_id = _get_or_create_device(cur, ezpu_serial, "ezpu") if ezpu_serial else None
-        tracker_id = _get_or_create_device(cur, tracker_serial, "tracker") if tracker_serial else None
-        lock_id = _get_or_create_device(cur, lock_serial, "lock") if lock_serial else None
 
         cur.execute(
             """
@@ -1592,16 +1599,16 @@ def db_assign_trip_device(trip_id, ezpu_serial, tracker_serial, lock_serial, zpu
                 updated_at = now()
             WHERE id = %s
             """,
-            (ezpu_id, tracker_id, lock_id, zpu_number, was_planned, assign_dt, trip_id),
+            (ezpu_id, tracker_id, lock_id, zpu_number, is_first_ezpu_assignment, assign_dt, trip_id),
         )
 
-        if was_planned and stop_row:
+        if is_first_ezpu_assignment and stop_row:
             cur.execute(
                 "UPDATE trip_stops SET status = 'исполнено', completed_at = %s, zpu_number = COALESCE(%s, zpu_number) WHERE id = %s",
                 (assign_dt, zpu_number, stop_row[0]),
             )
 
-        if was_planned and ezpu_id:
+        if is_first_ezpu_assignment:
             cur.execute(
                 """
                 INSERT INTO operations
