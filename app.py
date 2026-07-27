@@ -2661,7 +2661,7 @@ def db_get_planned_trips_with_board():
         conn.close()
 
 
-def biglock_find_device_for_board(board_number, limit=500):
+def biglock_find_device_for_board(board_number, limit=3000):
     """Ищет самое свежее событие постановки на охрану для этого борта
     и вытаскивает оттуда ЭЗПУ (ElectricDevice.CaseId) и ЗПУ
     (MechanicalDevice.CaseId), если найдено."""
