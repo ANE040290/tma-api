@@ -2641,11 +2641,20 @@ def db_get_active_trips_with_board():
 
 
 def db_get_planned_trips_with_board():
+    """Кандидаты на автопоиск ЭЗПУ в BigLock: рейсы, у которых ещё
+    нет назначенного ЭЗПУ - неважно, статус 'запланирован' (устройство
+    вообще не назначали) или уже 'в пути' (например, вручную ввели
+    только закладку, а ЭЗПУ ещё не знали)."""
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, board_number FROM trips WHERE status = 'запланирован' AND board_number IS NOT NULL"
+            """
+            SELECT id, board_number FROM trips
+            WHERE status IN ('запланирован', 'в пути')
+              AND board_number IS NOT NULL
+              AND ezpu_device_id IS NULL
+            """
         )
         return [{"id": r[0], "board_number": r[1]} for r in cur.fetchall()]
     finally:
