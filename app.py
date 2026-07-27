@@ -2661,6 +2661,18 @@ def db_get_planned_trips_with_board():
         conn.close()
 
 
+def biglock_list_all_electricdevices(limit=2000):
+    """Диагностика: список всех устройств без фильтра - смотрим, есть
+    ли в каждой записи поле с ТЕКУЩИМ номером борта/объекта. Если
+    есть - это надёжнее, чем искать по редким событиям в потоке
+    уведомлений (события ловят не каждое навешивание)."""
+    opener = _biglock_opener()
+    data = _biglock_post(opener, "/api/electricdevices/search", {
+        "Limit": limit, "SkipCount": True,
+    })
+    return data.get("Items", [])
+
+
 def biglock_find_device_for_board(board_number, limit=3000):
     """Ищет самое свежее событие постановки на охрану для этого борта
     и вытаскивает оттуда ЭЗПУ (ElectricDevice.CaseId) и ЗПУ
@@ -3522,6 +3534,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"unit_id": unit_id, "count": len(messages), "messages": messages})
+            return
+
+        if path == "/biglock/all-devices-raw":
+            try:
+                limit = int(qs.get("limit", ["10"])[0])
+            except ValueError:
+                limit = 10
+            try:
+                items = biglock_list_all_electricdevices(limit=limit)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(items), "items": items})
             return
 
         if path == "/biglock/device-status":
