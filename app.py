@@ -859,7 +859,10 @@ async function loadTrips() {
       tr.style.display = expanded ? '' : 'none';
       tr.onclick = () => openTripDetail(t.id);
       const num = `${t.id}.${i + 1}`;
-      const legStatus = leg.toStop ? leg.toStop.status : '—';
+      const legHasZpu = leg.fromStop && leg.fromStop.zpu_number;
+      const legStatus = leg.toStop
+        ? (leg.toStop.status === 'ожидание' && legHasZpu ? 'в пути' : leg.toStop.status)
+        : '—';
       const zpuStopId = leg.fromStop ? leg.fromStop.id : null;
       const editingZpu = zpuStopId && editingZpuStops.has(zpuStopId);
 
