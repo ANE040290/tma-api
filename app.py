@@ -2512,6 +2512,30 @@ def biglock_locks_search(guarded_object_id=None, is_released=None, limit=10, ord
     return _biglock_post(opener, "/api/locks/search", payload)
 
 
+def biglock_search_locks_by_device(case_id_partial, from_dt, to_dt, limit=1000):
+    """ПОДТВЕРЖДЁННО РАБОЧИЙ способ (поймано из страницы biglock.pro/map
+    через DevTools): тот же /api/locks/search, но с фильтром
+    ElectricDeviceInLock - поиск ПО СЕРИЙНИКУ ЭЗПУ (можно частично) за
+    диапазон дат. Возвращает ВСЮ историю навешиваний/снятий этой
+    пломбы за период - включая промежуточные переустановки на
+    складах, а не только текущее состояние."""
+    opener = _biglock_opener()
+    payload = {
+        "OrderBy": "ElectricDeviceAndAssembleTime",
+        "ElectricDeviceInLock": {
+            "ElectricDeviceCaseIdPartial": case_id_partial,
+            "From": from_dt,
+            "To": to_dt,
+        },
+        "IncludeCableBreakageEvent": True,
+        "IncludeIntervalAndLatePoint": True,
+        "IncludeLatestPoint": True,
+        "Limit": limit,
+        "Offset": 0,
+    }
+    return _biglock_post(opener, "/api/locks/search", payload)
+
+
 def biglock_lock_status(mechanical_case_id=None, native_id=None, client_id=None,
                          is_released=None, guarded_object_id=None, limit=10, order_by="LockTimeDesc"):
     """Самый прямой способ узнать навешивание/снятие: ищет записи
@@ -3611,6 +3635,23 @@ class Handler(BaseHTTPRequestHandler):
                     guarded_object_id=int(guarded_object_id) if guarded_object_id else None,
                     is_released=is_released,
                 )
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(data)
+            return
+
+        if path == "/biglock/device-history":
+            case_id = qs.get("case_id", [None])[0]
+            from_raw = qs.get("from", [None])[0]
+            to_raw = qs.get("to", [None])[0]
+            if not case_id:
+                self._send_json({"error": "Укажите case_id (можно частично, напр. 10630)"}, status=400)
+                return
+            try:
+                from_dt = from_raw + "T00:00:00.000Z" if from_raw else "2026-01-01T00:00:00.000Z"
+                to_dt = to_raw + "T23:59:59.000Z" if to_raw else datetime.datetime.now(datetime.timezone.utc).isoformat()
+                data = biglock_search_locks_by_device(case_id, from_dt, to_dt)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
