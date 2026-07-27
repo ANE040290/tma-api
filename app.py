@@ -786,7 +786,7 @@ async function loadTrips() {
     if (legs.length === 0) {
       legs.push({from: '—', to: '—', fromStop: null, toStop: null});
     }
-    const expanded = expandedTrips.has(t.id);
+    const expanded = legs.length <= 1 ? true : expandedTrips.has(t.id);
 
     const pickupsList = (t.pickups && t.pickups.length ? t.pickups : [])
       .slice().sort((a, b) => a.sequence - b.sequence)
