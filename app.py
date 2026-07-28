@@ -3507,9 +3507,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/wialon/webhook":
-            board = qs.get("board", [None])[0]
+            board_raw = qs.get("board", [None])[0]
             zone = qs.get("zone", [None])[0]
             time_raw = qs.get("time", [None])[0]
+
+            # Wialon шлёт полную строку объекта (напр. "10549--20260919/Алматы-Атырау-Актау"),
+            # а не голый номер борта - вытаскиваем номер борта из середины
+            board = board_raw
+            if board_raw:
+                m = _UNIT_NAME_RE.match(board_raw)
+                if m:
+                    board = m.group(1)
 
             if time_raw:
                 try:
@@ -3522,7 +3530,7 @@ class Handler(BaseHTTPRequestHandler):
                 arrived_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
 
             try:
-                db_store_wialon_webhook_event({"board": board, "zone": zone, "time": time_raw, "query": self.path})
+                db_store_wialon_webhook_event({"board_raw": board_raw, "board": board, "zone": zone, "time": time_raw, "query": self.path})
             except Exception as e:
                 print("Ошибка сохранения Wialon webhook:", e)
 
