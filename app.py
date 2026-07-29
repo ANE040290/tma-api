@@ -2544,12 +2544,13 @@ def biglock_get_lock_by_id(lock_id):
         return json.loads(resp.read())
 
 
-def biglock_locks_search(guarded_object_id=None, is_released=None, limit=10, order_by="LockTimeDesc"):
+def biglock_locks_search(guarded_object_id=None, is_released=None, limit=10, order_by="LockTimeDesc", opener=None):
     """Пробуем ресурс /api/locks/search (не lockeddevices/search) -
     раз прямой GET /api/locks/{id} подтверждённо работает и отдаёт
     актуальные данные, вероятно есть парный рабочий поиск по этому же
     ресурсу, в отличие от старого/нерабочего lockeddevices/search."""
-    opener = _biglock_opener()
+    if opener is None:
+        opener = _biglock_opener()
     payload = {"Limit": limit, "OrderBy": order_by}
     if guarded_object_id is not None:
         payload["GuardedObjectId"] = guarded_object_id
@@ -2622,10 +2623,11 @@ def biglock_lock_status(mechanical_case_id=None, native_id=None, client_id=None,
     }
 
 
-def biglock_guarded_object_status(native_id, obj_type="Auto"):
+def biglock_guarded_object_status(native_id, obj_type="Auto", opener=None):
     """Статус объекта охраны (машины/борта) по NativeId напрямую:
     Free (свободен) / LockInProgress (постановка идёт) / Locked (на охране)."""
-    opener = _biglock_opener()
+    if opener is None:
+        opener = _biglock_opener()
     data = _biglock_post(opener, "/api/guardedobjects/search", {
         "Type": obj_type, "NativeId": native_id, "Limit": 10,
     })
@@ -2858,14 +2860,20 @@ def biglock_sync_trip_assignment(trip_id, board_number):
     }
 
 
-def biglock_force_reconcile_trip(trip_id, board_number):
+def biglock_force_reconcile_trip(trip_id, board_number, opener=None):
     """Как biglock_reconcile_trip, но ПЕРЕЗАПИСЫВАЕТ данные даже по
     уже отмеченным 'исполнено' точкам - для разовой массовой чистки
     рейсов, испорченных старой (уже исправленной) логикой, когда все
     плечи закрывались одной и той же секундой. Использовать с
     осторожностью - подходит только пока рейс ещё разумно свежий
-    (BigLock хранит историю, но не вечно)."""
+    (BigLock хранит историю, но не вечно). Принимает общий opener,
+    чтобы не логиниться в BigLock заново на каждый рейс (иначе при
+    массовой обработке BigLock начинает отклонять частые входы, и
+    получаются неполные/пустые ответы, которые могут привести к
+    ошибочному откату уже верных данных)."""
     almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+    if opener is None:
+        opener = _biglock_opener()
 
     def parse_dt(raw):
         if not raw:
@@ -2875,7 +2883,7 @@ def biglock_force_reconcile_trip(trip_id, board_number):
             dt = dt.replace(tzinfo=datetime.timezone.utc)
         return dt.astimezone(almaty_tz)
 
-    status = biglock_guarded_object_status(board_number)
+    status = biglock_guarded_object_status(board_number, opener=opener)
     objects = status.get("objects", [])
     if not objects:
         return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
@@ -2883,8 +2891,8 @@ def biglock_force_reconcile_trip(trip_id, board_number):
     if guarded_object_id is None:
         return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
 
-    data_released = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=True, limit=50, order_by="LockTimeDesc")
-    data_active = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=False, limit=50, order_by="LockTimeDesc")
+    data_released = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=True, limit=50, order_by="LockTimeDesc", opener=opener)
+    data_active = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=False, limit=50, order_by="LockTimeDesc", opener=opener)
     items = data_released.get("Items", []) + data_active.get("Items", [])
     if not items:
         return {"trip_id": trip_id, "board_number": board_number, "action": "no_lock_history"}
@@ -2900,6 +2908,18 @@ def biglock_force_reconcile_trip(trip_id, board_number):
         )
         stops = cur.fetchall()
         legs = [(stops[i], stops[i + 1]) for i in range(len(stops) - 1)]
+
+        already_done = sum(1 for (_, to_stop) in legs if to_stop[3] == "исполнено")
+        if len(items_sorted) < already_done:
+            # данных меньше, чем уже подтверждённо закрытых плечей -
+            # похоже, ответ BigLock неполный (например, из-за частых
+            # запросов подряд) - НЕ трогаем рейс, чтобы не откатить
+            # верные данные по ошибке
+            conn.close()
+            return {
+                "trip_id": trip_id, "board_number": board_number, "action": "skipped_incomplete_data",
+                "found_sessions": len(items_sorted), "already_done_legs": already_done,
+            }
 
         changes = []
         for i, (from_stop, to_stop) in enumerate(legs):
@@ -2985,12 +3005,14 @@ def biglock_force_reconcile_all():
     finally:
         conn.close()
 
+    opener = _biglock_opener()
     results = []
     for t in trips:
         try:
-            results.append(biglock_force_reconcile_trip(t["id"], t["board_number"]))
+            results.append(biglock_force_reconcile_trip(t["id"], t["board_number"], opener=opener))
         except Exception as e:
             results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
+        time.sleep(0.3)
     return results
 
 
