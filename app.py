@@ -2884,8 +2884,9 @@ def biglock_reconcile_trip(trip_id, board_number):
     if guarded_object_id is None:
         return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
 
-    data = biglock_locks_search(guarded_object_id=guarded_object_id, limit=50, order_by="LockTimeDesc")
-    items = data.get("Items", [])
+    data_released = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=True, limit=50, order_by="LockTimeDesc")
+    data_active = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=False, limit=50, order_by="LockTimeDesc")
+    items = data_released.get("Items", []) + data_active.get("Items", [])
     if not items:
         return {"trip_id": trip_id, "board_number": board_number, "action": "no_lock_history"}
 
