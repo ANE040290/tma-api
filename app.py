@@ -2559,14 +2559,17 @@ def biglock_locks_search(guarded_object_id=None, is_released=None, limit=10, ord
     return _biglock_post(opener, "/api/locks/search", payload)
 
 
-def biglock_search_locks_by_device(case_id_partial, from_dt, to_dt, limit=1000):
+def biglock_search_locks_by_device(case_id_partial, from_dt, to_dt, limit=1000, opener=None):
     """ПОДТВЕРЖДЁННО РАБОЧИЙ способ (поймано из страницы biglock.pro/map
     через DevTools): тот же /api/locks/search, но с фильтром
     ElectricDeviceInLock - поиск ПО СЕРИЙНИКУ ЭЗПУ (можно частично) за
     диапазон дат. Возвращает ВСЮ историю навешиваний/снятий этой
     пломбы за период - включая промежуточные переустановки на
-    складах, а не только текущее состояние."""
-    opener = _biglock_opener()
+    складах, а не только текущее состояние. Надёжнее, чем
+    GuardedObjectId+IsReleased - тот фильтр в BigLock подтверждённо
+    отстаёт (не сразу показывает реально снятые пломбы)."""
+    if opener is None:
+        opener = _biglock_opener()
     payload = {
         "OrderBy": "ElectricDeviceAndAssembleTime",
         "ElectricDeviceInLock": {
@@ -2738,9 +2741,17 @@ def db_get_active_trips_with_board():
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, board_number FROM trips WHERE status = 'в пути' AND board_number IS NOT NULL"
+            """
+            SELECT t.id, t.board_number, d.serial_number, t.hang_datetime
+            FROM trips t
+            LEFT JOIN devices d ON d.id = t.ezpu_device_id
+            WHERE t.status = 'в пути' AND t.board_number IS NOT NULL
+            """
         )
-        return [{"id": r[0], "board_number": r[1]} for r in cur.fetchall()]
+        return [
+            {"id": r[0], "board_number": r[1], "ezpu_serial": r[2], "hang_datetime": r[3]}
+            for r in cur.fetchall()
+        ]
     finally:
         conn.close()
 
@@ -3016,15 +3027,17 @@ def biglock_force_reconcile_all():
     return results
 
 
-def biglock_reconcile_trip(trip_id, board_number):
-    """Надёжная синхронизация плеч рейса: вместо разовой проверки
-    'сейчас Free/Locked' (которая может пропустить промежуточные
-    переустановки пломбы, если между проверками сменилось несколько
-    штук подряд), подтягивает ПОЛНУЮ историю пломб по объекту
-    (locks-search по GuardedObjectId, без фильтра по IsReleased) и
-    сопоставляет каждую сессию по порядку с соответствующим плечом
-    маршрута. Уже закрытые плечи не трогает."""
+def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetime=None, opener=None):
+    """Надёжная синхронизация плеч рейса: подтягивает ПОЛНУЮ историю
+    пломб по серийнику ЭЗПУ за период рейса (device-history /
+    ElectricDeviceInLock) - этот способ надёжнее, чем поиск по
+    GuardedObjectId+IsReleased, у которого подтверждённо бывает
+    задержка (не сразу показывает реально снятые пломбы). Сопоставляет
+    каждую сессию по порядку с соответствующим плечом маршрута. Уже
+    закрытые плечи не трогает."""
     almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+    if opener is None:
+        opener = _biglock_opener()
 
     def parse_dt(raw):
         if not raw:
@@ -3034,17 +3047,22 @@ def biglock_reconcile_trip(trip_id, board_number):
             dt = dt.replace(tzinfo=datetime.timezone.utc)
         return dt.astimezone(almaty_tz)
 
-    status = biglock_guarded_object_status(board_number)
-    objects = status.get("objects", [])
-    if not objects:
-        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
-    guarded_object_id = objects[0].get("id")
-    if guarded_object_id is None:
-        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+    if not ezpu_serial:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "no_ezpu_on_trip"}
 
-    data_released = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=True, limit=50, order_by="LockTimeDesc")
-    data_active = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=False, limit=50, order_by="LockTimeDesc")
-    items = data_released.get("Items", []) + data_active.get("Items", [])
+    case_id_partial = ezpu_serial[3:] if ezpu_serial.upper().startswith("GNS") else ezpu_serial
+    from_dt = (hang_datetime or datetime.datetime.now(datetime.timezone.utc)) - datetime.timedelta(days=1)
+    from_dt_str = from_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    to_dt_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    data = biglock_search_locks_by_device(case_id_partial, from_dt_str, to_dt_str, limit=1000, opener=opener)
+    all_items = data.get("Items", [])
+    # серийник может частично совпасть с чужим устройством - сверяем борт
+    items = []
+    for it in all_items:
+        go = it.get("GuardedObject") or it.get("ReleasedGuardedObject") or {}
+        if go.get("NativeId") == board_number:
+            items.append(it)
     if not items:
         return {"trip_id": trip_id, "board_number": board_number, "action": "no_lock_history"}
 
@@ -3187,11 +3205,16 @@ def biglock_sync_all_active_trips():
             results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
 
     active_trips = db_get_active_trips_with_board()
+    active_opener = _biglock_opener() if active_trips else None
     for t in active_trips:
         try:
-            results.append(biglock_reconcile_trip(t["id"], t["board_number"]))
+            results.append(biglock_reconcile_trip(
+                t["id"], t["board_number"], ezpu_serial=t.get("ezpu_serial"),
+                hang_datetime=t.get("hang_datetime"), opener=active_opener,
+            ))
         except Exception as e:
             results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
+        time.sleep(0.2)
 
     return results
 
@@ -4119,12 +4142,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
                 return
             trip_id = body.get("trip_id")
-            board_number = body.get("board_number")
-            if not trip_id or not board_number:
-                self._send_json({"error": "Укажите trip_id и board_number"}, status=400)
+            if not trip_id:
+                self._send_json({"error": "Укажите trip_id"}, status=400)
                 return
             try:
-                result = biglock_reconcile_trip(int(trip_id), board_number)
+                trip_id = int(trip_id)
+                trip_data = db_get_trip(trip_id)
+                if not trip_data:
+                    self._send_json({"error": f"Рейс {trip_id} не найден"}, status=404)
+                    return
+                board_number = body.get("board_number") or trip_data.get("board_number")
+                ezpu_serial = body.get("ezpu_serial") or trip_data.get("ezpu_serial")
+                hang_dt_raw = trip_data.get("hang_datetime")
+                result = biglock_reconcile_trip(trip_id, board_number, ezpu_serial=ezpu_serial, hang_datetime=hang_dt_raw)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
