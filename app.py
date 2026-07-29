@@ -2858,6 +2858,142 @@ def biglock_sync_trip_assignment(trip_id, board_number):
     }
 
 
+def biglock_force_reconcile_trip(trip_id, board_number):
+    """Как biglock_reconcile_trip, но ПЕРЕЗАПИСЫВАЕТ данные даже по
+    уже отмеченным 'исполнено' точкам - для разовой массовой чистки
+    рейсов, испорченных старой (уже исправленной) логикой, когда все
+    плечи закрывались одной и той же секундой. Использовать с
+    осторожностью - подходит только пока рейс ещё разумно свежий
+    (BigLock хранит историю, но не вечно)."""
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+
+    def parse_dt(raw):
+        if not raw:
+            return None
+        dt = datetime.datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(almaty_tz)
+
+    status = biglock_guarded_object_status(board_number)
+    objects = status.get("objects", [])
+    if not objects:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+    guarded_object_id = objects[0].get("id")
+    if guarded_object_id is None:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+
+    data_released = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=True, limit=50, order_by="LockTimeDesc")
+    data_active = biglock_locks_search(guarded_object_id=guarded_object_id, is_released=False, limit=50, order_by="LockTimeDesc")
+    items = data_released.get("Items", []) + data_active.get("Items", [])
+    if not items:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "no_lock_history"}
+
+    items_sorted = sorted(items, key=lambda it: it.get("LockTime") or "")
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, sequence, stop_type, status, zpu_number FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            (trip_id,),
+        )
+        stops = cur.fetchall()
+        legs = [(stops[i], stops[i + 1]) for i in range(len(stops) - 1)]
+
+        changes = []
+        for i, (from_stop, to_stop) in enumerate(legs):
+            if i >= len(items_sorted):
+                # для этого плеча нет данных в BigLock - если оно ошибочно
+                # отмечено исполненным старой логикой, откатываем обратно
+                if to_stop[3] == "исполнено":
+                    cur.execute(
+                        "UPDATE trip_stops SET status = 'ожидание', completed_at = NULL WHERE id = %s",
+                        (to_stop[0],),
+                    )
+                    changes.append(f"leg{i + 1}_reverted")
+                continue
+
+            session = items_sorted[i]
+            zpu = session.get("MechanicalDeviceCaseId")
+            release_time = parse_dt(session.get("ReleaseTime"))
+
+            if zpu and from_stop[4] != zpu:
+                cur.execute("UPDATE trip_stops SET zpu_number = %s WHERE id = %s", (zpu, from_stop[0]))
+                changes.append(f"leg{i + 1}_zpu={zpu}")
+
+            if release_time:
+                cur.execute(
+                    "UPDATE trip_stops SET status = 'исполнено', completed_at = %s WHERE id = %s",
+                    (release_time, to_stop[0]),
+                )
+                changes.append(f"leg{i + 1}_closed_at={release_time.isoformat()}")
+            elif to_stop[3] == "исполнено":
+                # плечо ещё не снято по факту, но было ошибочно закрыто - откатываем
+                cur.execute(
+                    "UPDATE trip_stops SET status = 'ожидание', completed_at = NULL WHERE id = %s",
+                    (to_stop[0],),
+                )
+                changes.append(f"leg{i + 1}_reverted")
+
+        conn.commit()
+
+        cur.execute("SELECT COUNT(*) FROM trip_stops WHERE trip_id = %s AND status != 'исполнено'", (trip_id,))
+        remaining = cur.fetchone()[0]
+        if remaining == 0:
+            last_release = parse_dt(items_sorted[-1].get("ReleaseTime")) if items_sorted else None
+            cur.execute(
+                "UPDATE trips SET status = 'снят', removal_datetime = %s, updated_at = now() WHERE id = %s",
+                (last_release or datetime.datetime.now(almaty_tz), trip_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE trips SET status = 'в пути', removal_datetime = NULL, updated_at = now() WHERE id = %s",
+                (trip_id,),
+            )
+        conn.commit()
+        trip_closed = remaining == 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return {
+        "trip_id": trip_id, "board_number": board_number, "action": "force_reconciled",
+        "changes": changes, "trip_closed": trip_closed,
+    }
+
+
+def biglock_force_reconcile_all():
+    """Проходит по ВСЕМ рейсам, у которых есть ЭЗПУ и номер борта
+    (и в пути, и уже 'снят' - на случай, если закрылись неверно),
+    и для каждого запускает жёсткую пересинхронизацию с реальной
+    историей BigLock. Разовая массовая чистка."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, board_number FROM trips
+            WHERE board_number IS NOT NULL AND ezpu_device_id IS NOT NULL
+              AND status IN ('в пути', 'снят')
+            ORDER BY id
+            """
+        )
+        trips = [{"id": r[0], "board_number": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    results = []
+    for t in trips:
+        try:
+            results.append(biglock_force_reconcile_trip(t["id"], t["board_number"]))
+        except Exception as e:
+            results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
+    return results
+
+
 def biglock_reconcile_trip(trip_id, board_number):
     """Надёжная синхронизация плеч рейса: вместо разовой проверки
     'сейчас Free/Locked' (которая может пропустить промежуточные
@@ -3971,6 +4107,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json(result)
+            return
+
+        if path == "/biglock/fix-all":
+            try:
+                results = biglock_force_reconcile_all()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(results), "results": results})
             return
 
         if path == "/trips/import-file":
