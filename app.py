@@ -2258,6 +2258,49 @@ def wialon_get_units():
     return units
 
 
+def wialon_get_zones(resource_id=None):
+    """Все геозоны (склады, маршруты) с координатами - через ресурс
+    (аккаунт), тот же принцип, что и с уведомлениями (core/search_items
+    по avl_resource с флагом геозон, 0x1000 - подтверждено рабочим)."""
+    sid = _wialon_login()
+    resp = _wialon_call("core/search_items", {
+        "spec": {
+            "itemsType": "avl_resource", "propName": "sys_name", "propValueMask": "*",
+            "sortType": "sys_name", "propType": "property",
+        },
+        "force": 1, "flags": 0x1000 | 1, "from": 0, "to": 0,
+    }, sid=sid)
+
+    zones = []
+    for item in resp.get("items", []):
+        if resource_id is not None and item.get("id") != resource_id:
+            continue
+        zones_dict = item.get("zl") or {}
+        for zone_id, z in zones_dict.items():
+            zones.append({
+                "resource_id": item.get("id"),
+                "id": zone_id,
+                "name": z.get("n"),
+                "type": z.get("t"),  # 1=circle, 2=polygon, 3=line
+                "center_lat": z.get("y"),
+                "center_lon": z.get("x"),
+                "radius": z.get("r"),
+                "points": z.get("p"),
+            })
+    return zones
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    """Расстояние между двумя точками GPS в метрах."""
+    import math
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(min(1, a ** 0.5))
+
+
 def wialon_get_unit_messages(unit_id, since_ts, limit=50, flags=0x0400, flags_mask=0x0400):
     sid = _wialon_login()
     resp = _wialon_call("messages/load_interval", {
@@ -3574,6 +3617,18 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     result.append({"resource_id": r.get("id"), "resource_name": r.get("nm"), "notification_id": ntf_id, "raw": ntf})
             self._send_json({"count": len(result), "notifications": result})
+            return
+
+        if path == "/wialon/zones":
+            name_filter = qs.get("name", [None])[0]
+            try:
+                zones = wialon_get_zones()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            if name_filter:
+                zones = [z for z in zones if z.get("name") and name_filter.lower() in z["name"].lower()]
+            self._send_json({"count": len(zones), "zones": zones})
             return
 
         if path == "/wialon/units":
