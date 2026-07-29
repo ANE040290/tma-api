@@ -2858,6 +2858,96 @@ def biglock_sync_trip_assignment(trip_id, board_number):
     }
 
 
+def biglock_reconcile_trip(trip_id, board_number):
+    """Надёжная синхронизация плеч рейса: вместо разовой проверки
+    'сейчас Free/Locked' (которая может пропустить промежуточные
+    переустановки пломбы, если между проверками сменилось несколько
+    штук подряд), подтягивает ПОЛНУЮ историю пломб по объекту
+    (locks-search по GuardedObjectId, без фильтра по IsReleased) и
+    сопоставляет каждую сессию по порядку с соответствующим плечом
+    маршрута. Уже закрытые плечи не трогает."""
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+
+    def parse_dt(raw):
+        if not raw:
+            return None
+        dt = datetime.datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(almaty_tz)
+
+    status = biglock_guarded_object_status(board_number)
+    objects = status.get("objects", [])
+    if not objects:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+    guarded_object_id = objects[0].get("id")
+    if guarded_object_id is None:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "not_found_in_biglock"}
+
+    data = biglock_locks_search(guarded_object_id=guarded_object_id, limit=50, order_by="LockTimeDesc")
+    items = data.get("Items", [])
+    if not items:
+        return {"trip_id": trip_id, "board_number": board_number, "action": "no_lock_history"}
+
+    items_sorted = sorted(items, key=lambda it: it.get("LockTime") or "")
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, sequence, stop_type, status, zpu_number FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            (trip_id,),
+        )
+        stops = cur.fetchall()
+        legs = [(stops[i], stops[i + 1]) for i in range(len(stops) - 1)]
+
+        changes = []
+        for i, (from_stop, to_stop) in enumerate(legs):
+            if to_stop[3] == "исполнено":
+                continue  # плечо уже закрыто - не трогаем
+            if i >= len(items_sorted):
+                break  # для этого плеча пока нет данных в BigLock
+
+            session = items_sorted[i]
+            zpu = session.get("MechanicalDeviceCaseId")
+            release_time = parse_dt(session.get("ReleaseTime"))
+
+            if zpu and from_stop[4] != zpu:
+                cur.execute("UPDATE trip_stops SET zpu_number = %s WHERE id = %s", (zpu, from_stop[0]))
+                changes.append(f"leg{i + 1}_zpu={zpu}")
+
+            if release_time:
+                cur.execute(
+                    "UPDATE trip_stops SET status = 'исполнено', completed_at = %s WHERE id = %s",
+                    (release_time, to_stop[0]),
+                )
+                changes.append(f"leg{i + 1}_closed_at={release_time.isoformat()}")
+
+        conn.commit()
+
+        cur.execute("SELECT COUNT(*) FROM trip_stops WHERE trip_id = %s AND status != 'исполнено'", (trip_id,))
+        remaining = cur.fetchone()[0]
+        trip_closed = False
+        if remaining == 0:
+            last_release = parse_dt(items_sorted[-1].get("ReleaseTime")) if items_sorted else None
+            cur.execute(
+                "UPDATE trips SET status = 'снят', removal_datetime = %s, updated_at = now() WHERE id = %s",
+                (last_release or datetime.datetime.now(almaty_tz), trip_id),
+            )
+            conn.commit()
+            trip_closed = True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return {
+        "trip_id": trip_id, "board_number": board_number, "action": "reconciled",
+        "changes": changes, "trip_closed": trip_closed,
+    }
+
+
 def biglock_sync_trip_removal(trip_id, board_number):
     """Проверяет статус борта в BigLock; если объект свободен (Free) -
     закрывает ближайшую необработанную точку выгрузки рейса, используя
@@ -2940,7 +3030,7 @@ def biglock_sync_all_active_trips():
     active_trips = db_get_active_trips_with_board()
     for t in active_trips:
         try:
-            results.append(biglock_sync_trip_removal(t["id"], t["board_number"]))
+            results.append(biglock_reconcile_trip(t["id"], t["board_number"]))
         except Exception as e:
             results.append({"trip_id": t["id"], "board_number": t["board_number"], "action": "error", "error": str(e)})
 
@@ -3861,6 +3951,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"count": len(results), "results": results})
+            return
+
+        if path == "/biglock/reconcile-trip":
+            try:
+                body = self._read_json_body()
+            except json.JSONDecodeError:
+                self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+                return
+            trip_id = body.get("trip_id")
+            board_number = body.get("board_number")
+            if not trip_id or not board_number:
+                self._send_json({"error": "Укажите trip_id и board_number"}, status=400)
+                return
+            try:
+                result = biglock_reconcile_trip(int(trip_id), board_number)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json(result)
             return
 
         if path == "/trips/import-file":
