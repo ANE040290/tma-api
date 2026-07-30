@@ -3159,6 +3159,23 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
         go = it.get("GuardedObject") or it.get("ReleasedGuardedObject") or {}
         if go.get("NativeId") == board_number:
             items.append(it)
+
+    # ВАЖНО: поиск по серийнику (ElectricDeviceInLock) подтверждённо не
+    # находит ещё АКТИВНУЮ (не снятую) пломбу, сколько бы времени ни
+    # прошло - только уже завершённые сессии. Текущую активную нужно
+    # искать отдельно, по внутреннему ID объекта.
+    already_have_active = any(not it.get("ReleaseTime") for it in items)
+    if not already_have_active:
+        status = biglock_guarded_object_status(board_number, opener=opener)
+        objects = status.get("objects", [])
+        if objects and objects[0].get("id") is not None:
+            active_data = biglock_locks_search(
+                guarded_object_id=objects[0]["id"], is_released=False, limit=5, opener=opener,
+            )
+            active_items = active_data.get("Items", [])
+            if active_items:
+                items.append(active_items[0])
+
     if not items:
         return {"trip_id": trip_id, "board_number": board_number, "action": "no_lock_history"}
 
