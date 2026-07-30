@@ -2258,18 +2258,22 @@ def wialon_get_units():
     return units
 
 
-def wialon_get_zones(resource_id=None):
+def wialon_get_zones(resource_id=None, flags=0x1000 | 1, raw=False):
     """Все геозоны (склады, маршруты) с координатами - через ресурс
     (аккаунт), тот же принцип, что и с уведомлениями (core/search_items
-    по avl_resource с флагом геозон, 0x1000 - подтверждено рабочим)."""
+    по avl_resource). flags=0x1000|1 даёт список зон (имя/тип), но
+    без геометрии - для координат нужен другой набор флагов."""
     sid = _wialon_login()
     resp = _wialon_call("core/search_items", {
         "spec": {
             "itemsType": "avl_resource", "propName": "sys_name", "propValueMask": "*",
             "sortType": "sys_name", "propType": "property",
         },
-        "force": 1, "flags": 0x1000 | 1, "from": 0, "to": 0,
+        "force": 1, "flags": flags, "from": 0, "to": 0,
     }, sid=sid)
+
+    if raw:
+        return resp.get("items", [])
 
     zones = []
     for item in resp.get("items", []):
@@ -3893,8 +3897,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/wialon/zones":
             name_filter = qs.get("name", [None])[0]
+            raw_mode = qs.get("raw", [None])[0]
+            flags_raw = qs.get("flags", [None])[0]
             try:
-                zones = wialon_get_zones()
+                flags = int(flags_raw, 0) if flags_raw else (0x1000 | 1)
+            except ValueError:
+                flags = 0x1000 | 1
+            try:
+                if raw_mode:
+                    items = wialon_get_zones(flags=flags, raw=True)
+                    self._send_json({"count": len(items), "items_raw": items})
+                    return
+                zones = wialon_get_zones(flags=flags)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
