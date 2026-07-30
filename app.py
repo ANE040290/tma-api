@@ -2310,6 +2310,93 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(min(1, a ** 0.5))
 
 
+def wialon_sync_arrivals(threshold_m=1000):
+    """Проверяет все активные рейсы: сверяет текущие координаты машины
+    (Wialon) с координатами склада ближайшей ещё не пройденной точки
+    выгрузки. Работает без вебхука (тот подтверждённо не отправляет
+    реальных запросов) - просто периодический опрос координат."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.id, t.board_number, ts.id, ts.location
+            FROM trips t
+            JOIN trip_stops ts ON ts.trip_id = t.id
+            WHERE t.status = 'в пути' AND t.board_number IS NOT NULL
+              AND ts.stop_type = 'выгрузка' AND ts.arrived_at IS NULL
+              AND ts.id = (
+                  SELECT id FROM trip_stops
+                  WHERE trip_id = t.id AND stop_type = 'выгрузка' AND arrived_at IS NULL
+                  ORDER BY sequence LIMIT 1
+              )
+            """
+        )
+        candidates = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not candidates:
+        return []
+
+    units = wialon_get_units()
+    unit_by_board = {}
+    for u in units:
+        if u.get("board_number"):
+            unit_by_board.setdefault(u["board_number"], []).append(u)
+
+    all_zones = wialon_get_zones()
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+
+    results = []
+    for trip_id, board_number, stop_id, location in candidates:
+        board_units = unit_by_board.get(board_number, [])
+        if not board_units:
+            results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "unit_not_found"})
+            continue
+        # берём объект с самым длинным именем - обычно это основной
+        # тягач с полным маршрутом, а не суффиксы /З, /П (закладка/прицеп)
+        unit = max(board_units, key=lambda u: len(u.get("name") or ""))
+        lat, lon = unit.get("lat"), unit.get("lon")
+        if lat is None or lon is None:
+            results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "no_position"})
+            continue
+
+        loc_lower = (location or "").strip().lower()
+        matched_zone = None
+        for z in all_zones:
+            if z.get("center_lat") is None:
+                continue
+            zname = (z.get("name") or "").lower()
+            zname_clean = zname.replace("склад,", "").replace("склад", "").strip()
+            if loc_lower and (loc_lower in zname or zname_clean in loc_lower or loc_lower == zname_clean):
+                matched_zone = z
+                break
+
+        if not matched_zone:
+            results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "zone_not_found", "location": location})
+            continue
+
+        dist = _haversine_m(lat, lon, matched_zone["center_lat"], matched_zone["center_lon"])
+        if dist <= threshold_m:
+            arrived_dt = datetime.datetime.now(almaty_tz)
+            try:
+                db_mark_stop_arrived(trip_id, stop_id, arrived_dt)
+                results.append({
+                    "trip_id": trip_id, "stop_id": stop_id, "action": "arrived",
+                    "zone": matched_zone["name"], "distance_m": round(dist),
+                })
+            except Exception as e:
+                results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "error", "error": str(e)})
+        else:
+            results.append({
+                "trip_id": trip_id, "stop_id": stop_id, "action": "not_yet",
+                "zone": matched_zone["name"], "distance_m": round(dist),
+            })
+
+    return results
+
+
 def wialon_get_unit_messages(unit_id, since_ts, limit=50, flags=0x0400, flags_mask=0x0400):
     sid = _wialon_login()
     resp = _wialon_call("messages/load_interval", {
@@ -4148,6 +4235,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/biglock/sync-now":
             try:
                 results = biglock_sync_all_active_trips()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"count": len(results), "results": results})
+            return
+
+        if path == "/wialon/sync-arrivals":
+            qs_local = parse_qs(urlparse(self.path).query)
+            try:
+                threshold = int(qs_local.get("threshold_m", ["1000"])[0])
+            except ValueError:
+                threshold = 1000
+            try:
+                results = wialon_sync_arrivals(threshold_m=threshold)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
