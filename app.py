@@ -2310,6 +2310,35 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(min(1, a ** 0.5))
 
 
+def db_get_zone_aliases():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT location_name, zone_name FROM zone_aliases")
+        return {r[0]: r[1] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def db_set_zone_alias(location_name, zone_name):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO zone_aliases (location_name, zone_name) VALUES (%s, %s)
+            ON CONFLICT (location_name) DO UPDATE SET zone_name = EXCLUDED.zone_name
+            """,
+            (location_name, zone_name),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def wialon_sync_arrivals(threshold_m=1000):
     """Проверяет все активные рейсы: сверяет текущие координаты машины
     (Wialon) с координатами склада ближайшей ещё не пройденной точки
@@ -2346,6 +2375,7 @@ def wialon_sync_arrivals(threshold_m=1000):
             unit_by_board.setdefault(u["board_number"], []).append(u)
 
     all_zones = wialon_get_zones()
+    aliases = db_get_zone_aliases()
     almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
 
     results = []
@@ -2364,7 +2394,20 @@ def wialon_sync_arrivals(threshold_m=1000):
 
         loc_lower = (location or "").strip().lower()
         matched_zone = None
+
+        # 1) сначала - ручное соответствие (город/склад в рейсе -> реальное
+        # название геозоны в Wialon), если задано
+        alias_zone_name = aliases.get(location)
+        if alias_zone_name:
+            for z in all_zones:
+                if z.get("center_lat") is not None and z.get("name") == alias_zone_name:
+                    matched_zone = z
+                    break
+
+        # 2) иначе - подстрочное совпадение названия
         for z in all_zones:
+            if matched_zone:
+                break
             if z.get("center_lat") is None:
                 continue
             zname = (z.get("name") or "").lower()
@@ -4270,6 +4313,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"count": len(results), "results": results})
+            return
+
+        if path == "/wialon/zone-alias":
+            try:
+                body = self._read_json_body()
+            except json.JSONDecodeError:
+                self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+                return
+            location_name = body.get("location_name")
+            zone_name = body.get("zone_name")
+            if not location_name or not zone_name:
+                self._send_json({"error": "Укажите location_name и zone_name"}, status=400)
+                return
+            try:
+                db_set_zone_alias(location_name, zone_name)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({"status": "ok", "location_name": location_name, "zone_name": zone_name})
             return
 
         if path == "/biglock/reconcile-trip":
