@@ -2281,14 +2281,19 @@ def wialon_get_zones(resource_id=None, flags=0x1000 | 1, raw=False):
             continue
         zones_dict = item.get("zl") or {}
         for zone_id, z in zones_dict.items():
+            b = z.get("b") or {}
             zones.append({
                 "resource_id": item.get("id"),
                 "id": zone_id,
                 "name": z.get("n"),
-                "type": z.get("t"),  # 1=circle, 2=polygon, 3=line
-                "center_lat": z.get("y"),
-                "center_lon": z.get("x"),
-                "radius": z.get("r"),
+                "type": z.get("t"),  # 2=полигон, 3=круг (по наблюдаемым данным)
+                "width_or_radius": z.get("w"),
+                "center_lat": b.get("cen_y"),
+                "center_lon": b.get("cen_x"),
+                "min_lat": b.get("min_y"),
+                "max_lat": b.get("max_y"),
+                "min_lon": b.get("min_x"),
+                "max_lon": b.get("max_x"),
                 "points": z.get("p"),
             })
     return zones
