@@ -4782,6 +4782,15 @@ def _biglock_background_sync_loop(interval_seconds=300):
         except Exception as e:
             print("[biglock-sync] ошибка фоновой синхронизации:", e)
 
+        try:
+            if os.environ.get("WIALON_TOKEN"):
+                arrival_results = wialon_sync_arrivals()
+                arrived = [r for r in arrival_results if r.get("action") == "arrived"]
+                if arrived:
+                    print(f"[wialon-sync] проверено точек: {len(arrival_results)}, прибытий: {len(arrived)}")
+        except Exception as e:
+            print("[wialon-sync] ошибка фоновой синхронизации:", e)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
