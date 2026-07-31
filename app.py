@@ -591,7 +591,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <input id="report-rate" type="number" value="4060" style="width:100px">
       </div>
       <button onclick="loadReportDetail()">Показать</button>
-      <button class="secondary" id="report-export-btn" style="display:none" onclick="exportMovementReport()">Скачать Excel</button>
+      <button class="secondary" id="report-export-btn" onclick="exportMovementReport()">Скачать Excel</button>
     </div>
     <div class="table-scroll" id="report-billing-view">
     <table>
