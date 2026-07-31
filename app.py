@@ -1355,12 +1355,6 @@ function onReportTypeChange() {
   document.getElementById('report-billing-view').style.display = type === 'billing' ? '' : 'none';
   document.getElementById('report-movement-view').style.display = type === 'movement' ? '' : 'none';
   document.getElementById('report-rate-field').style.display = type === 'billing' ? '' : 'none';
-  document.getElementById('report-period-mode-field').style.display = type === 'movement' ? '' : 'none';
-  document.getElementById('report-export-btn').style.display = type === 'movement' ? '' : 'none';
-  if (type === 'billing') {
-    document.getElementById('report-period-mode').value = 'month';
-    onPeriodModeChange();
-  }
   document.getElementById('report-total').textContent = '';
 }
 
@@ -1386,8 +1380,16 @@ function _movementReportParams() {
 }
 
 function exportMovementReport() {
-  const params = _movementReportParams();
-  window.open('/reports/board-movement/export?' + params.toString(), '_blank');
+  const type = document.getElementById('report-type').value;
+  if (type === 'billing') {
+    const rate = document.getElementById('report-rate').value;
+    const params = _movementReportParams();
+    params.set('rate', rate);
+    window.open('/reports/ezpu-billing/export?' + params.toString(), '_blank');
+  } else {
+    const params = _movementReportParams();
+    window.open('/reports/board-movement/export?' + params.toString(), '_blank');
+  }
 }
 
 async function loadReportDetail() {
@@ -1401,10 +1403,9 @@ async function loadReportDetail() {
 }
 
 async function loadBillingReport() {
-  const year = document.getElementById('report-year').value;
-  const month = document.getElementById('report-month').value;
   const rate = document.getElementById('report-rate').value;
-  const params = new URLSearchParams({contractor: currentReportCompany, year, month, rate});
+  const params = _movementReportParams();
+  params.set('rate', rate);
   const r = await fetch('/reports/ezpu-billing?' + params.toString());
   const data = await r.json();
   const body = document.getElementById('report-rows-body');
@@ -3482,6 +3483,60 @@ def _billing_days(hang_dt, removal_dt, cutoff_hour=11):
     return max(days, 1)
 
 
+def build_ezpu_billing_xlsx(report):
+    """Собирает Excel-файл биллингового отчёта по ЭЗПУ."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Биллинг ЭЗПУ"
+
+    headers = ["№", "Борт", "ЭЗПУ", "Откуда", "Куда", "Навешивание", "Снятие",
+               "Дней", "Ставка", "Сумма"]
+    ws.append(headers)
+    header_font = Font(name="Arial", bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    def fmt_dt(raw):
+        if not raw:
+            return ""
+        if isinstance(raw, str):
+            try:
+                raw = datetime.datetime.fromisoformat(raw)
+            except ValueError:
+                return raw
+        return raw.strftime("%d.%m.%Y %H:%M")
+
+    for row in report.get("rows", []):
+        ws.append([
+            row.get("num"), row.get("board_number"), row.get("ezpu_serial"),
+            row.get("origin"), row.get("destination"),
+            fmt_dt(row.get("hang_datetime")), fmt_dt(row.get("removal_datetime")),
+            row.get("days"), row.get("rate"), row.get("amount"),
+        ])
+
+    total_row = len(report.get("rows", [])) + 3
+    ws.cell(row=total_row, column=9, value="Итого:").font = Font(name="Arial", bold=True)
+    ws.cell(row=total_row, column=10, value=report.get("total_amount", 0)).font = Font(name="Arial", bold=True)
+
+    widths = [6, 12, 12, 16, 16, 18, 18, 8, 10, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    for r in range(2, ws.max_row + 1):
+        for c in range(1, len(headers) + 1):
+            ws.cell(row=r, column=c).font = Font(name="Arial")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def build_board_movement_xlsx(report):
     """Собирает Excel-файл отчёта 'Движение бортов' из уже
     посчитанных данных (db_get_board_movement_report)."""
@@ -3613,12 +3668,17 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
     }
 
 
-def db_get_ezpu_billing_report(contractor_name, year, month, rate=DEFAULT_EZPU_RATE):
+def db_get_ezpu_billing_report(contractor_name, year=None, month=None, rate=DEFAULT_EZPU_RATE,
+                                date_from=None, date_to=None):
     conn = get_connection()
     try:
         cur = conn.cursor()
-        period_from = datetime.date(year, month, 1)
-        period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
+        if date_from and date_to:
+            period_from = date_from
+            period_to = date_to
+        else:
+            period_from = datetime.date(year, month, 1)
+            period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
 
         cur.execute(
             """
@@ -4006,22 +4066,89 @@ class Handler(BaseHTTPRequestHandler):
             year = qs.get("year", [None])[0]
             month = qs.get("month", [None])[0]
             rate = qs.get("rate", [None])[0]
-            if not contractor or not year or not month:
-                self._send_json({"error": "Укажите contractor, year, month"}, status=400)
+            date_from_raw = qs.get("date_from", [None])[0]
+            date_to_raw = qs.get("date_to", [None])[0]
+            if not contractor:
+                self._send_json({"error": "Укажите contractor"}, status=400)
                 return
+            date_from = date_to = None
+            if date_from_raw and date_to_raw:
+                try:
+                    date_from = datetime.date.fromisoformat(date_from_raw)
+                    date_to = datetime.date.fromisoformat(date_to_raw)
+                except ValueError:
+                    self._send_json({"error": "date_from/date_to должны быть в формате ГГГГ-ММ-ДД"}, status=400)
+                    return
+                year = month = None
+            else:
+                if not year or not month:
+                    self._send_json({"error": "Укажите либо year и month, либо date_from и date_to"}, status=400)
+                    return
+                try:
+                    year = int(year)
+                    month = int(month)
+                except ValueError:
+                    self._send_json({"error": "year/month должны быть числами"}, status=400)
+                    return
             try:
-                year = int(year)
-                month = int(month)
                 rate = float(rate) if rate else DEFAULT_EZPU_RATE
             except ValueError:
-                self._send_json({"error": "year/month/rate должны быть числами"}, status=400)
+                self._send_json({"error": "rate должен быть числом"}, status=400)
                 return
             try:
-                report = db_get_ezpu_billing_report(contractor, year, month, rate)
+                report = db_get_ezpu_billing_report(contractor, year, month, rate, date_from=date_from, date_to=date_to)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json(report)
+            return
+
+        if path == "/reports/ezpu-billing/export":
+            contractor = qs.get("contractor", [None])[0]
+            year = qs.get("year", [None])[0]
+            month = qs.get("month", [None])[0]
+            rate = qs.get("rate", [None])[0]
+            date_from_raw = qs.get("date_from", [None])[0]
+            date_to_raw = qs.get("date_to", [None])[0]
+            if not contractor:
+                self._send_json({"error": "Укажите contractor"}, status=400)
+                return
+            date_from = date_to = None
+            if date_from_raw and date_to_raw:
+                try:
+                    date_from = datetime.date.fromisoformat(date_from_raw)
+                    date_to = datetime.date.fromisoformat(date_to_raw)
+                except ValueError:
+                    self._send_json({"error": "date_from/date_to должны быть в формате ГГГГ-ММ-ДД"}, status=400)
+                    return
+                year = month = None
+            else:
+                if not year or not month:
+                    self._send_json({"error": "Укажите либо year и month, либо date_from и date_to"}, status=400)
+                    return
+                try:
+                    year = int(year)
+                    month = int(month)
+                except ValueError:
+                    self._send_json({"error": "year/month должны быть числами"}, status=400)
+                    return
+            try:
+                rate = float(rate) if rate else DEFAULT_EZPU_RATE
+            except ValueError:
+                self._send_json({"error": "rate должен быть числом"}, status=400)
+                return
+            try:
+                report = db_get_ezpu_billing_report(contractor, year, month, rate, date_from=date_from, date_to=date_to)
+                xlsx_bytes = build_ezpu_billing_xlsx(report)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", 'attachment; filename="ezpu_billing.xlsx"')
+            self.send_header("Content-Length", str(len(xlsx_bytes)))
+            self.end_headers()
+            self.wfile.write(xlsx_bytes)
             return
 
         if path == "/reports/board-movement":
