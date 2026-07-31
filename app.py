@@ -19,6 +19,7 @@ API для учёта ЭЗПУ и трекеров - замена ручного
 import os
 import re
 import json
+import base64
 import datetime
 import zipfile
 import time
@@ -3953,10 +3954,43 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print("%s - %s" % (self.address_string(), format % args))
 
+    def _check_auth(self):
+        """Проверка HTTP Basic Auth. Возвращает True если доступ разрешён.
+        Если BASIC_AUTH_USER/PASSWORD не заданы в окружении - защита
+        выключена (для удобства локальной разработки)."""
+        expected_user = os.environ.get("BASIC_AUTH_USER")
+        expected_pass = os.environ.get("BASIC_AUTH_PASSWORD")
+        if not expected_user or not expected_pass:
+            return True
+
+        auth_header = self.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                user, _, password = decoded.partition(":")
+                if user == expected_user and password == expected_pass:
+                    return True
+            except Exception:
+                pass
+
+        body = b"401 Unauthorized"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="TMA"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
+
+        _public_paths = ("/health", "/wialon/webhook")
+        if path not in _public_paths:
+            if not self._check_auth():
+                return
 
         if path in ("/dashboard", "/"):
             self._send_html(DASHBOARD_HTML)
@@ -4568,6 +4602,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        _public_paths = ("/biglock/webhook",)
+        if path not in _public_paths:
+            if not self._check_auth():
+                return
 
         if path == "/operations":
             self._handle_create_operation()
