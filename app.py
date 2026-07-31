@@ -563,19 +563,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <option value="movement">Движение бортов</option>
         </select>
       </div>
-      <div class="field">
+      <div class="field" id="report-period-mode-field">
+        <label>Период</label>
+        <select id="report-period-mode" onchange="onPeriodModeChange()">
+          <option value="month">По месяцу</option>
+          <option value="range">Точный диапазон дат</option>
+        </select>
+      </div>
+      <div class="field" id="report-month-field">
         <label>Месяц</label>
         <select id="report-month"></select>
       </div>
-      <div class="field">
+      <div class="field" id="report-year-field">
         <label>Год</label>
         <input id="report-year" type="number" style="width:90px">
+      </div>
+      <div class="field" id="report-date-from-field" style="display:none">
+        <label>С</label>
+        <input id="report-date-from" type="date">
+      </div>
+      <div class="field" id="report-date-to-field" style="display:none">
+        <label>По</label>
+        <input id="report-date-to" type="date">
       </div>
       <div class="field" id="report-rate-field">
         <label>Ставка, тенге/сутки</label>
         <input id="report-rate" type="number" value="4060" style="width:100px">
       </div>
       <button onclick="loadReportDetail()">Показать</button>
+      <button class="secondary" id="report-export-btn" style="display:none" onclick="exportMovementReport()">Скачать Excel</button>
     </div>
     <div class="table-scroll" id="report-billing-view">
     <table>
@@ -1339,7 +1355,39 @@ function onReportTypeChange() {
   document.getElementById('report-billing-view').style.display = type === 'billing' ? '' : 'none';
   document.getElementById('report-movement-view').style.display = type === 'movement' ? '' : 'none';
   document.getElementById('report-rate-field').style.display = type === 'billing' ? '' : 'none';
+  document.getElementById('report-period-mode-field').style.display = type === 'movement' ? '' : 'none';
+  document.getElementById('report-export-btn').style.display = type === 'movement' ? '' : 'none';
+  if (type === 'billing') {
+    document.getElementById('report-period-mode').value = 'month';
+    onPeriodModeChange();
+  }
   document.getElementById('report-total').textContent = '';
+}
+
+function onPeriodModeChange() {
+  const mode = document.getElementById('report-period-mode').value;
+  const isRange = mode === 'range';
+  document.getElementById('report-month-field').style.display = isRange ? 'none' : '';
+  document.getElementById('report-year-field').style.display = isRange ? 'none' : '';
+  document.getElementById('report-date-from-field').style.display = isRange ? '' : 'none';
+  document.getElementById('report-date-to-field').style.display = isRange ? '' : 'none';
+}
+
+function _movementReportParams() {
+  const mode = document.getElementById('report-period-mode').value;
+  if (mode === 'range') {
+    const dateFrom = document.getElementById('report-date-from').value;
+    const dateTo = document.getElementById('report-date-to').value;
+    return new URLSearchParams({contractor: currentReportCompany, date_from: dateFrom, date_to: dateTo});
+  }
+  const year = document.getElementById('report-year').value;
+  const month = document.getElementById('report-month').value;
+  return new URLSearchParams({contractor: currentReportCompany, year, month});
+}
+
+function exportMovementReport() {
+  const params = _movementReportParams();
+  window.open('/reports/board-movement/export?' + params.toString(), '_blank');
 }
 
 async function loadReportDetail() {
@@ -1387,9 +1435,7 @@ async function loadBillingReport() {
 }
 
 async function loadBoardMovementReport() {
-  const year = document.getElementById('report-year').value;
-  const month = document.getElementById('report-month').value;
-  const params = new URLSearchParams({contractor: currentReportCompany, year, month});
+  const params = _movementReportParams();
   const r = await fetch('/reports/board-movement?' + params.toString());
   const data = await r.json();
   const body = document.getElementById('report-movement-body');
@@ -2384,13 +2430,17 @@ def wialon_sync_arrivals(threshold_m=1000):
         if not board_units:
             results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "unit_not_found"})
             continue
-        # берём объект с самым длинным именем - обычно это основной
-        # тягач с полным маршрутом, а не суффиксы /З, /П (закладка/прицеп)
-        unit = max(board_units, key=lambda u: len(u.get("name") or ""))
-        lat, lon = unit.get("lat"), unit.get("lon")
-        if lat is None or lon is None:
+        # На борту несколько устройств с координатами (тягач, пломба,
+        # прицеп/закладка) - берём то, у которого САМЫЙ СВЕЖИЙ сигнал,
+        # а не просто "с самым длинным именем": если у одного из
+        # устройств (например, пломбы) в моменте нет связи, координаты
+        # возьмутся с другого рабочего устройства на этом же борту.
+        units_with_position = [u for u in board_units if u.get("lat") is not None and u.get("lon") is not None]
+        if not units_with_position:
             results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "no_position"})
             continue
+        unit = max(units_with_position, key=lambda u: u.get("last_seen") or 0)
+        lat, lon = unit.get("lat"), unit.get("lon")
 
         loc_lower = (location or "").strip().lower()
         matched_zone = None
@@ -3432,18 +3482,78 @@ def _billing_days(hang_dt, removal_dt, cutoff_hour=11):
     return max(days, 1)
 
 
-def db_get_board_movement_report(contractor_name, year, month, arrival_cutoff_hour=15):
+def build_board_movement_xlsx(report):
+    """Собирает Excel-файл отчёта 'Движение бортов' из уже
+    посчитанных данных (db_get_board_movement_report)."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Движение бортов"
+
+    headers = ["№", "Борт", "Склад", "ЭЗПУ", "№ ЗПУ", "Откуда", "Куда",
+               "Навешено", "Прибыл на базу", "Снято", "Примечание"]
+    ws.append(headers)
+    header_font = Font(name="Arial", bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    def fmt_dt(raw):
+        if not raw:
+            return ""
+        if isinstance(raw, str):
+            try:
+                raw = datetime.datetime.fromisoformat(raw)
+            except ValueError:
+                return raw
+        return raw.strftime("%d.%m.%Y %H:%M")
+
+    for row in report.get("rows", []):
+        ws.append([
+            row.get("num"), row.get("board_number"), row.get("warehouse"),
+            row.get("ezpu_serial"), row.get("zpu_number"),
+            row.get("origin"), row.get("destination"),
+            fmt_dt(row.get("hang_datetime")), fmt_dt(row.get("arrival_datetime")),
+            fmt_dt(row.get("removal_datetime")), row.get("note"),
+        ])
+
+    widths = [6, 12, 14, 12, 14, 16, 16, 18, 18, 18, 18]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    for r in range(2, ws.max_row + 1):
+        for c in range(1, len(headers) + 1):
+            ws.cell(row=r, column=c).font = Font(name="Arial")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def db_get_board_movement_report(contractor_name, year=None, month=None, arrival_cutoff_hour=15,
+                                  date_from=None, date_to=None):
     """Отчёт 'Движение бортов': по каждому плечу маршрута показывает
     склад отгрузки, ЭЗПУ/ЗПУ, откуда-куда, время навешивания, время
     прибытия на базу (фиксируется через Wialon, поле arrived_at) и
     время снятия пломбы (фиксируется через BigLock/вручную, поле
     completed_at). Примечание: если прибыл до 15:00 - 'ок', позже -
-    'позднее прибытие' (правило разгрузки в тот же/на следующий день)."""
+    'позднее прибытие' (правило разгрузки в тот же/на следующий день).
+    Период задаётся либо year+month, либо явно date_from/date_to
+    (объекты datetime.date) - если оба заданы, date_from/date_to
+    приоритетнее."""
     conn = get_connection()
     try:
         cur = conn.cursor()
-        period_from = datetime.date(year, month, 1)
-        period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
+        if date_from and date_to:
+            period_from = date_from
+            period_to = date_to
+        else:
+            period_from = datetime.date(year, month, 1)
+            period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
 
         cur.execute(
             """
@@ -3497,7 +3607,10 @@ def db_get_board_movement_report(contractor_name, year, month, arrival_cutoff_ho
     for i, r in enumerate(rows, start=1):
         r["num"] = i
 
-    return {"contractor": contractor_name, "year": year, "month": month, "rows": rows}
+    return {
+        "contractor": contractor_name, "year": year, "month": month, "rows": rows,
+        "date_from": period_from.isoformat(), "date_to": period_to.isoformat(),
+    }
 
 
 def db_get_ezpu_billing_report(contractor_name, year, month, rate=DEFAULT_EZPU_RATE):
@@ -3915,21 +4028,78 @@ class Handler(BaseHTTPRequestHandler):
             contractor = qs.get("contractor", [None])[0]
             year = qs.get("year", [None])[0]
             month = qs.get("month", [None])[0]
-            if not contractor or not year or not month:
-                self._send_json({"error": "Укажите contractor, year, month"}, status=400)
+            date_from_raw = qs.get("date_from", [None])[0]
+            date_to_raw = qs.get("date_to", [None])[0]
+            if not contractor:
+                self._send_json({"error": "Укажите contractor"}, status=400)
                 return
+            date_from = date_to = None
+            if date_from_raw and date_to_raw:
+                try:
+                    date_from = datetime.date.fromisoformat(date_from_raw)
+                    date_to = datetime.date.fromisoformat(date_to_raw)
+                except ValueError:
+                    self._send_json({"error": "date_from/date_to должны быть в формате ГГГГ-ММ-ДД"}, status=400)
+                    return
+                year = month = None
+            else:
+                if not year or not month:
+                    self._send_json({"error": "Укажите либо year и month, либо date_from и date_to"}, status=400)
+                    return
+                try:
+                    year = int(year)
+                    month = int(month)
+                except ValueError:
+                    self._send_json({"error": "year/month должны быть числами"}, status=400)
+                    return
             try:
-                year = int(year)
-                month = int(month)
-            except ValueError:
-                self._send_json({"error": "year/month должны быть числами"}, status=400)
-                return
-            try:
-                report = db_get_board_movement_report(contractor, year, month)
+                report = db_get_board_movement_report(contractor, year, month, date_from=date_from, date_to=date_to)
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json(report)
+            return
+
+        if path == "/reports/board-movement/export":
+            contractor = qs.get("contractor", [None])[0]
+            year = qs.get("year", [None])[0]
+            month = qs.get("month", [None])[0]
+            date_from_raw = qs.get("date_from", [None])[0]
+            date_to_raw = qs.get("date_to", [None])[0]
+            if not contractor:
+                self._send_json({"error": "Укажите contractor"}, status=400)
+                return
+            date_from = date_to = None
+            if date_from_raw and date_to_raw:
+                try:
+                    date_from = datetime.date.fromisoformat(date_from_raw)
+                    date_to = datetime.date.fromisoformat(date_to_raw)
+                except ValueError:
+                    self._send_json({"error": "date_from/date_to должны быть в формате ГГГГ-ММ-ДД"}, status=400)
+                    return
+                year = month = None
+            else:
+                if not year or not month:
+                    self._send_json({"error": "Укажите либо year и month, либо date_from и date_to"}, status=400)
+                    return
+                try:
+                    year = int(year)
+                    month = int(month)
+                except ValueError:
+                    self._send_json({"error": "year/month должны быть числами"}, status=400)
+                    return
+            try:
+                report = db_get_board_movement_report(contractor, year, month, date_from=date_from, date_to=date_to)
+                xlsx_bytes = build_board_movement_xlsx(report)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", 'attachment; filename="dvizhenie_bortov.xlsx"')
+            self.send_header("Content-Length", str(len(xlsx_bytes)))
+            self.end_headers()
+            self.wfile.write(xlsx_bytes)
             return
 
         if path == "/biglock/events":
