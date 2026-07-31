@@ -2353,10 +2353,10 @@ def wialon_sync_arrivals(threshold_m=1000):
             FROM trips t
             JOIN trip_stops ts ON ts.trip_id = t.id
             WHERE t.status = 'в пути' AND t.board_number IS NOT NULL
-              AND ts.stop_type = 'выгрузка' AND ts.arrived_at IS NULL
+              AND ts.stop_type = 'выгрузка' AND ts.status = 'ожидание' AND ts.arrived_at IS NULL
               AND ts.id = (
                   SELECT id FROM trip_stops
-                  WHERE trip_id = t.id AND stop_type = 'выгрузка' AND arrived_at IS NULL
+                  WHERE trip_id = t.id AND stop_type = 'выгрузка' AND status = 'ожидание'
                   ORDER BY sequence LIMIT 1
               )
             """
