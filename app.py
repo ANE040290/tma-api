@@ -4494,6 +4494,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if name_filter:
                 zones = [z for z in zones if z.get("name") and name_filter.lower() in z["name"].lower()]
+            hex_mode = qs.get("hex", [None])[0]
+            if hex_mode:
+                for z in zones:
+                    z["name_bytes"] = (z.get("name") or "").encode("utf-8").hex()
+                    z["name_len"] = len(z.get("name") or "")
             self._send_json({"count": len(zones), "zones": zones})
             return
 
