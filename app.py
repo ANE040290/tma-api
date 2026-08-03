@@ -2385,16 +2385,12 @@ def wialon_check_zone_coverage():
         loc_lower = loc.strip().lower()
         found = None
         if loc in aliases:
-            for z in warehouse_zones:
-                if z.get("name") == aliases[loc]:
+            alias_target = aliases[loc].strip().lower()
+            for z in all_zones:
+                zname = (z.get("name") or "").strip().lower()
+                if zname == alias_target and z.get("center_lat") is not None:
                     found = z
                     break
-            if not found:
-                # alias может указывать не на "Склад,"-зону - проверим среди всех
-                for z in all_zones:
-                    if z.get("name") == aliases[loc] and z.get("center_lat") is not None:
-                        found = z
-                        break
         else:
             for z in warehouse_zones:
                 zname = (z.get("name") or "").lower()
@@ -2505,8 +2501,10 @@ def wialon_sync_arrivals(threshold_m=1000):
         # название геозоны в Wialon), если задано
         alias_zone_name = aliases.get(location)
         if alias_zone_name:
+            alias_target = alias_zone_name.strip().lower()
             for z in all_zones:
-                if z.get("center_lat") is not None and z.get("name") == alias_zone_name:
+                zname = (z.get("name") or "").strip().lower()
+                if z.get("center_lat") is not None and zname == alias_target:
                     matched_zone = z
                     break
 
