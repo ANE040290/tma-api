@@ -3,7 +3,7 @@ API для учёта ЭЗПУ и трекеров - замена ручного
 
 Написано на чистом Python: http.server (встроен в Python) + pg8000
 (чистый Python-драйвер Postgres, без C-расширений). Ничего не требует
-компиляции - работает на любой версии Python, включая самые новые. 
+компиляции - работает на любой версии Python, включая самые новые.
 
 Эндпоинты:
     GET  /health
@@ -4448,6 +4448,21 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     result.append({"resource_id": r.get("id"), "resource_name": r.get("nm"), "notification_id": ntf_id, "raw": ntf})
             self._send_json({"count": len(result), "notifications": result})
+            return
+
+        if path == "/wialon/zone-aliases":
+            try:
+                aliases = db_get_zone_aliases()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({
+                "count": len(aliases),
+                "aliases": [
+                    {"location_name": k, "zone_name": v, "zone_name_len": len(v), "zone_name_bytes": v.encode("utf-8").hex()}
+                    for k, v in aliases.items()
+                ],
+            })
             return
 
         if path == "/wialon/zone-coverage":
