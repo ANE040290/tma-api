@@ -2358,6 +2358,60 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(min(1, a ** 0.5))
 
 
+def db_get_distinct_dropoff_locations():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT location FROM trip_stops WHERE stop_type = 'выгрузка' AND location IS NOT NULL ORDER BY location"
+        )
+        return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def wialon_check_zone_coverage():
+    """Диагностика: для каждого города назначения, который реально
+    встречается в наших рейсах, проверяет - есть ли для него в Wialon
+    подходящая зона-склад ('Склад, Город'), или уже настроен alias."""
+    locations = db_get_distinct_dropoff_locations()
+    all_zones = wialon_get_zones()
+    aliases = db_get_zone_aliases()
+
+    warehouse_zones = [z for z in all_zones if (z.get("name") or "").lower().startswith("склад") and z.get("center_lat") is not None]
+
+    result = []
+    for loc in locations:
+        loc_lower = loc.strip().lower()
+        found = None
+        if loc in aliases:
+            for z in warehouse_zones:
+                if z.get("name") == aliases[loc]:
+                    found = z
+                    break
+            if not found:
+                # alias может указывать не на "Склад,"-зону - проверим среди всех
+                for z in all_zones:
+                    if z.get("name") == aliases[loc] and z.get("center_lat") is not None:
+                        found = z
+                        break
+        else:
+            for z in warehouse_zones:
+                zname = (z.get("name") or "").lower()
+                zname_clean = zname.replace("склад,", "").replace("склад", "").strip()
+                if loc_lower in zname or zname_clean in loc_lower or loc_lower == zname_clean:
+                    found = z
+                    break
+
+        result.append({
+            "location": loc,
+            "has_alias": loc in aliases,
+            "matched_zone": found.get("name") if found else None,
+            "status": "ok" if found else "MISSING",
+        })
+    return result
+
+
 def db_get_zone_aliases():
     conn = get_connection()
     try:
@@ -4396,6 +4450,16 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     result.append({"resource_id": r.get("id"), "resource_name": r.get("nm"), "notification_id": ntf_id, "raw": ntf})
             self._send_json({"count": len(result), "notifications": result})
+            return
+
+        if path == "/wialon/zone-coverage":
+            try:
+                result = wialon_check_zone_coverage()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            missing = [r for r in result if r["status"] == "MISSING"]
+            self._send_json({"count": len(result), "missing_count": len(missing), "results": result})
             return
 
         if path == "/wialon/zones":
