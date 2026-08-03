@@ -2456,7 +2456,27 @@ def wialon_sync_arrivals(threshold_m=1000):
                     matched_zone = z
                     break
 
-        # 2) иначе - подстрочное совпадение названия
+        # 2) иначе - сначала ищем ТОЛЬКО среди зон-складов ("Склад, ...") -
+        # в Wialon бывают ещё огромные зоны-коридоры всего маршрута
+        # (напр. "Алматы-Степногорск-Кокш-Петропавловск"), которые тоже
+        # совпадают по подстроке, но их координаты - это где-то посередине
+        # маршрута, а не реальный склад, и их брать нельзя
+        for z in all_zones:
+            if matched_zone:
+                break
+            if z.get("center_lat") is None:
+                continue
+            zname = (z.get("name") or "")
+            if not zname.lower().startswith("склад"):
+                continue
+            zname_clean = zname.lower().replace("склад,", "").replace("склад", "").strip()
+            if loc_lower and (loc_lower in zname.lower() or zname_clean in loc_lower or loc_lower == zname_clean):
+                matched_zone = z
+                break
+
+        # 3) если склада с таким названием нет - подстрочное совпадение
+        # среди всех оставшихся зон (может дать неточный коридор, но
+        # лучше, чем ничего)
         for z in all_zones:
             if matched_zone:
                 break
