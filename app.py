@@ -2482,16 +2482,20 @@ def wialon_sync_arrivals(threshold_m=1000):
         if not board_units:
             results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "unit_not_found"})
             continue
-        # На борту несколько устройств с координатами (тягач, пломба,
-        # прицеп/закладка) - берём то, у которого САМЫЙ СВЕЖИЙ сигнал,
-        # а не просто "с самым длинным именем": если у одного из
-        # устройств (например, пломбы) в моменте нет связи, координаты
-        # возьмутся с другого рабочего устройства на этом же борту.
+        # На борту несколько устройств с координатами (тягач, прицеп/П,
+        # закладка/З). Координаты берём ТОЛЬКО с прицепа (суффикс "/П")
+        # или с тягача (полное название с маршрутом, не просто суффикс) -
+        # "/З" (закладка) для координат не используем никогда, она часто
+        # стационарная/резервная и не отражает реальное движение груза.
         units_with_position = [u for u in board_units if u.get("lat") is not None and u.get("lon") is not None]
         if not units_with_position:
             results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "no_position"})
             continue
-        unit = max(units_with_position, key=lambda u: u.get("last_seen") or 0)
+        valid_units = [u for u in units_with_position if not (u.get("name") or "").endswith("/З")]
+        if not valid_units:
+            results.append({"trip_id": trip_id, "stop_id": stop_id, "action": "no_valid_unit"})
+            continue
+        unit = max(valid_units, key=lambda u: u.get("last_seen") or 0)
         lat, lon = unit.get("lat"), unit.get("lon")
 
         loc_lower = (location or "").strip().lower()
