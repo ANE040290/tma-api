@@ -2035,6 +2035,18 @@ def db_close_trip(trip_id, removal_dt, location):
             (removal_dt, trip_id),
         )
 
+        # Раньше эта функция не трогала точки маршрута - рейс мог
+        # закрыться со статусом 'снят', а последняя точка так и
+        # оставалась 'ожидание' (несоответствие в данных). Теперь
+        # закрываем и все ещё не пройденные точки этим же временем.
+        cur.execute(
+            """
+            UPDATE trip_stops SET status = 'исполнено', completed_at = %s
+            WHERE trip_id = %s AND status != 'исполнено'
+            """,
+            (removal_dt, trip_id),
+        )
+
         if ezpu_id:
             cur.execute(
                 """
