@@ -45,6 +45,9 @@ TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
 TRIP_STOP_ARRIVE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/arrive$")
 TRIP_STOP_ZPU_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/zpu$")
+TRIP_STOP_UPDATE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/update$")
+TRIP_STOP_ADD_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/add-after$")
+TRIP_STOP_DELETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/delete$")
 ACT_RE = re.compile(r"^/acts/(\d+)$")
 ACT_DOWNLOAD_RE = re.compile(r"^/acts/(\d+)/download$")
 
@@ -897,6 +900,15 @@ async function loadTrips() {
     }
     const expanded = legs.length <= 1 ? true : expandedTrips.has(t.id);
 
+    // Контроль повторяющихся номеров ЗПУ внутри рейса - считаем, сколько
+    // раз встречается каждый номер среди всех точек, чтобы подсветить
+    // дубли красным (обычно ошибка - одна и та же пломба на двух плечах)
+    const allStopsForTrip = [...(t.pickups || []), ...(t.dropoffs || [])];
+    const zpuCounts = {};
+    allStopsForTrip.forEach(s => {
+      if (s.zpu_number) zpuCounts[s.zpu_number] = (zpuCounts[s.zpu_number] || 0) + 1;
+    });
+
     const pickupsList = (t.pickups && t.pickups.length ? t.pickups : [])
       .slice().sort((a, b) => a.sequence - b.sequence)
       .map(s => `<div class="stop-line"><span class="stop-dot ${s.status === 'исполнено' ? 'done' : ''}"></span>${s.location}</div>`)
@@ -987,10 +999,19 @@ async function loadTrips() {
         legActions.push(`<button onclick="event.stopPropagation(); saveZpu(${t.id}, ${zpuStopId})">Сохранить ЗПУ</button>`);
         legActions.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditZpu(${zpuStopId})">Отмена</button>`);
       }
+      if (leg.toStop) {
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); editStopField(${t.id}, ${leg.toStop.id}, '${(leg.to || '').replace(/'/g, "\\'")}')">Название</button>`);
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); editStopTime(${t.id}, ${leg.toStop.id}, 'completed_at', 'Время снятия')">Время снятия</button>`);
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); addStopAfter(${t.id}, ${leg.toStop.id})">+ Точка после</button>`);
+        legActions.push(`<button class="secondary" style="color:#991b1b" onclick="event.stopPropagation(); deleteStop(${t.id}, ${leg.toStop.id}, '${(leg.to || '').replace(/'/g, "\\'")}')">Удалить точку</button>`);
+      }
+
+      const legZpuValue = leg.fromStop ? leg.fromStop.zpu_number : null;
+      const isDuplicateZpu = legZpuValue && zpuCounts[legZpuValue] > 1;
 
       tr.innerHTML = `
         <td>${num}</td>
-        <td style="font-size:12px"><span style="color:#888">ЗПУ:</span> <b style="color:#111; font-size:14px">${zpuCell(leg, editingZpu, zpuStopId)}</b></td>
+        <td style="font-size:12px"><span style="color:#888">ЗПУ:</span> <b style="color:${isDuplicateZpu ? '#dc2626' : '#111'}; font-size:14px">${zpuCell(leg, editingZpu, zpuStopId)}${isDuplicateZpu ? ' ⚠️' : ''}</b></td>
         <td>${leg.from} → ${leg.to}</td>
         <td style="font-size:12px">${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : ''}</td>
         <td>${leg.toStop
@@ -1002,6 +1023,49 @@ async function loadTrips() {
     });
   });
   document.getElementById('trip-count-label').textContent = trips.length + ' рейсов' + (hideCompleted ? ' (без завершённых)' : '');
+}
+
+async function editStopField(tripId, stopId, currentLocation) {
+  const newLocation = prompt('Название точки:', currentLocation);
+  if (newLocation === null || !newLocation.trim()) return;
+  const r = await fetch(`/trips/${tripId}/stops/${stopId}/update`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({location: newLocation.trim()}),
+  });
+  if (r.status === 200) { loadTrips(); }
+  else { const d = await r.json(); alert(d.error || 'Ошибка обновления'); }
+}
+
+async function editStopTime(tripId, stopId, field, label) {
+  const val = prompt(label + '\n(формат: ГГГГ-ММ-ДДTЧЧ:ММ, например 2026-08-10T14:30; оставьте пустым чтобы очистить)');
+  if (val === null) return;
+  const body = {};
+  body[field] = val.trim() || null;
+  const r = await fetch(`/trips/${tripId}/stops/${stopId}/update`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (r.status === 200) { loadTrips(); }
+  else { const d = await r.json(); alert(d.error || 'Ошибка обновления'); }
+}
+
+async function addStopAfter(tripId, afterStopId) {
+  const location = prompt('Название новой точки маршрута:');
+  if (!location || !location.trim()) return;
+  const isPickup = confirm('Это точка ПОГРУЗКИ?\n\nOK = погрузка, Отмена = выгрузка');
+  const r = await fetch(`/trips/${tripId}/stops/${afterStopId}/add-after`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({stop_type: isPickup ? 'погрузка' : 'выгрузка', location: location.trim()}),
+  });
+  if (r.status === 200) { loadTrips(); }
+  else { const d = await r.json(); alert(d.error || 'Ошибка добавления точки'); }
+}
+
+async function deleteStop(tripId, stopId, label) {
+  if (!confirm('Удалить точку "' + label + '"? Действие необратимо.')) return;
+  const r = await fetch(`/trips/${tripId}/stops/${stopId}/delete`, { method: 'POST' });
+  if (r.status === 200) { loadTrips(); }
+  else { const d = await r.json(); alert(d.error || 'Ошибка удаления точки'); }
 }
 
 function zpuCell(leg, editingZpu, zpuStopId) {
@@ -1978,6 +2042,91 @@ def db_set_stop_zpu(trip_id, stop_id, zpu_number):
         row = cur.fetchone()
         conn.commit()
         return row is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_update_stop(trip_id, stop_id, fields):
+    """Универсальное редактирование точки маршрута - любое из полей:
+    location, zpu_number, status, completed_at, arrived_at.
+    Незаданные поля (None в fields) не трогаются."""
+    allowed = {"location", "zpu_number", "status", "completed_at", "arrived_at"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return False
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    params = list(updates.values()) + [stop_id, trip_id]
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE trip_stops SET {set_clause} WHERE id = %s AND trip_id = %s RETURNING id",
+            params,
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_add_stop(trip_id, after_stop_id, stop_type, location):
+    """Вставляет новую точку маршрута СРАЗУ ПОСЛЕ указанной (по id),
+    автоматически сдвигая sequence всех последующих точек на 1."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT sequence FROM trip_stops WHERE id = %s AND trip_id = %s", (after_stop_id, trip_id))
+        row = cur.fetchone()
+        if not row:
+            return None
+        after_seq = row[0]
+        new_seq = after_seq + 1
+        cur.execute(
+            "UPDATE trip_stops SET sequence = sequence + 1 WHERE trip_id = %s AND sequence >= %s",
+            (trip_id, new_seq),
+        )
+        cur.execute(
+            """
+            INSERT INTO trip_stops (trip_id, stop_type, sequence, location, status)
+            VALUES (%s, %s, %s, %s, 'ожидание') RETURNING id
+            """,
+            (trip_id, stop_type, new_seq, location),
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_delete_stop(trip_id, stop_id):
+    """Удаляет точку маршрута и сдвигает sequence оставшихся точек,
+    чтобы не оставалось разрывов в нумерации."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT sequence FROM trip_stops WHERE id = %s AND trip_id = %s", (stop_id, trip_id))
+        row = cur.fetchone()
+        if not row:
+            return False
+        deleted_seq = row[0]
+        cur.execute("DELETE FROM trip_stops WHERE id = %s AND trip_id = %s", (stop_id, trip_id))
+        cur.execute(
+            "UPDATE trip_stops SET sequence = sequence - 1 WHERE trip_id = %s AND sequence > %s",
+            (trip_id, deleted_seq),
+        )
+        conn.commit()
+        return True
     except Exception:
         conn.rollback()
         raise
@@ -5084,6 +5233,21 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_set_stop_zpu(int(m.group(1)), int(m.group(2)))
             return
 
+        m = TRIP_STOP_UPDATE_RE.match(path)
+        if m:
+            self._handle_update_stop(int(m.group(1)), int(m.group(2)))
+            return
+
+        m = TRIP_STOP_ADD_RE.match(path)
+        if m:
+            self._handle_add_stop(int(m.group(1)), int(m.group(2)))
+            return
+
+        m = TRIP_STOP_DELETE_RE.match(path)
+        if m:
+            self._handle_delete_stop(int(m.group(1)), int(m.group(2)))
+            return
+
         self._send_json({"error": "не найдено"}, status=404)
 
     def _read_json_body(self):
@@ -5366,6 +5530,93 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"stop_id": stop_id, "zpu_number": zpu_number, "status": "updated"})
+
+    def _handle_update_stop(self, trip_id, stop_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        fields = {}
+        if "location" in body:
+            fields["location"] = (body.get("location") or "").strip() or None
+        if "zpu_number" in body:
+            fields["zpu_number"] = (body.get("zpu_number") or "").strip() or None
+        if "status" in body:
+            status_val = (body.get("status") or "").strip()
+            if status_val not in ("ожидание", "исполнено"):
+                self._send_json({"error": "status должен быть 'ожидание' или 'исполнено'"}, status=400)
+                return
+            fields["status"] = status_val
+        for dt_field in ("completed_at", "arrived_at"):
+            if dt_field in body:
+                raw = body.get(dt_field)
+                if not raw:
+                    fields[dt_field] = None
+                else:
+                    try:
+                        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+                        fields[dt_field] = dt
+                    except ValueError:
+                        self._send_json({"error": f"Неверный формат даты для {dt_field}"}, status=400)
+                        return
+
+        if not fields:
+            self._send_json({"error": "Не указаны поля для обновления"}, status=400)
+            return
+
+        try:
+            ok = db_update_stop(trip_id, stop_id, fields)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if not ok:
+            self._send_json({"error": "Остановка не найдена"}, status=404)
+            return
+
+        self._send_json({"stop_id": stop_id, "status": "updated"})
+
+    def _handle_add_stop(self, trip_id, after_stop_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        stop_type = body.get("stop_type")
+        location = (body.get("location") or "").strip()
+        if stop_type not in ("погрузка", "выгрузка") or not location:
+            self._send_json({"error": "Укажите stop_type ('погрузка'/'выгрузка') и location"}, status=400)
+            return
+
+        try:
+            new_id = db_add_stop(trip_id, after_stop_id, stop_type, location)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if new_id is None:
+            self._send_json({"error": "Точка, после которой нужно вставить, не найдена"}, status=404)
+            return
+
+        self._send_json({"stop_id": new_id, "status": "added"})
+
+    def _handle_delete_stop(self, trip_id, stop_id):
+        try:
+            ok = db_delete_stop(trip_id, stop_id)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if not ok:
+            self._send_json({"error": "Остановка не найдена"}, status=404)
+            return
+
+        self._send_json({"stop_id": stop_id, "status": "deleted"})
 
     def _handle_create_act(self):
         try:
