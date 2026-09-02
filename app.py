@@ -1021,12 +1021,17 @@ async function loadTrips() {
       const legZpuValue = leg.fromStop ? leg.fromStop.zpu_number : null;
       const isDuplicateZpu = legZpuValue && zpuCounts[legZpuValue] > 1;
 
+      // Время навешивания ЭТОГО плеча: для первого плеча - это время
+      // навешивания всего рейса, для остальных - время исполнения
+      // предыдущей точки (когда там сняли/поставили новую пломбу)
+      const legHangTime = i === 0 ? t.hang_datetime : (leg.fromStop ? leg.fromStop.completed_at : null);
+
       const toCellHtml = editingStop
         ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
         : leg.to;
       const timeCellHtml = editingStop
         ? `<input id="edit-time-${leg.toStop.id}" type="datetime-local" value="${leg.toStop.completed_at ? leg.toStop.completed_at.slice(0, 16) : ''}" style="width:150px" onclick="event.stopPropagation()">`
-        : (legDone && leg.toStop && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '');
+        : `Навешено:<br>${legHangTime ? fmtDate(legHangTime) : '—'}<br>Снято:<br>${legDone && leg.toStop && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '—'}`;
       const statusCellHtml = editingStop
         ? `<select id="edit-status-${leg.toStop.id}" onclick="event.stopPropagation()">
              <option value="ожидание" ${leg.toStop.status === 'ожидание' ? 'selected' : ''}>Ожидание</option>
