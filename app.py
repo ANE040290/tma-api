@@ -335,6 +335,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px; }
   .table-scroll table { min-width: 600px; }
   #tab-trips .table-scroll table { min-width: 0; width: 100%; table-layout: fixed; }
+  #report-billing-view table, #report-movement-view table { min-width: 0; width: 100%; }
+  #report-billing-view td, #report-movement-view td,
+  #report-billing-view th, #report-movement-view th { padding: 6px 6px; font-size: 12px; }
   .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 12px; color: #666; }
@@ -693,7 +696,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>№</th><th>Борт</th><th>ЭЗПУ</th><th>Откуда</th><th>Куда</th>
-        <th>Навешивание</th><th>Снятие</th><th>Дней</th><th>Ставка</th><th>Сумма</th>
+        <th>Навешивание</th><th>Снятие</th><th>Дней</th><th>Ставка</th><th>Сумма</th><th></th>
       </tr></thead>
       <tbody id="report-rows-body"></tbody>
     </table>
@@ -1589,29 +1592,75 @@ async function loadBillingReport() {
   const body = document.getElementById('report-rows-body');
   body.innerHTML = '';
   if (!data.rows || !data.rows.length) {
-    body.innerHTML = '<tr><td colspan="10" style="color:#888">Нет закрытых рейсов с ЭЗПУ за этот период</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" style="color:#888">Нет закрытых рейсов с ЭЗПУ за этот период</td></tr>';
     document.getElementById('report-total').textContent = '';
     return;
   }
   data.rows.forEach(row => {
     const tr = document.createElement('tr');
+    const rowKey = row.to_stop_id;
+    const isEditing = rowKey && editingReportRows.has('b' + rowKey);
+    const inputStyle = 'width:126px; font-size:12px; padding:2px 4px';
+
+    const hangCellHtml = isEditing
+      ? `<input id="bill-hang-${rowKey}" type="datetime-local" value="${row.hang_datetime ? row.hang_datetime.slice(0,16) : ''}" style="${inputStyle}">`
+      : fmtDate(row.hang_datetime);
+    const removalCellHtml = isEditing
+      ? `<input id="bill-removal-${rowKey}" type="datetime-local" value="${row.removal_datetime ? row.removal_datetime.slice(0,16) : ''}" style="${inputStyle}">`
+      : fmtDate(row.removal_datetime);
+    const actionsHtml = !rowKey ? '' : (isEditing
+      ? `<button onclick="saveBillingRowEdit(${row.trip_id}, ${row.from_stop_id}, ${row.to_stop_id})">Сохранить</button>
+         <button class="secondary" onclick="toggleBillingRowEdit(${rowKey})">Отмена</button>`
+      : `<button class="secondary" onclick="toggleBillingRowEdit(${rowKey})">✏️</button>`);
+
     tr.innerHTML = `
       <td>${row.num}</td>
       <td>${row.board_number || '—'}</td>
       <td>${row.ezpu_serial}</td>
       <td>${row.origin || '—'}</td>
       <td>${row.destination || '—'}</td>
-      <td>${fmtDate(row.hang_datetime)}</td>
-      <td>${fmtDate(row.removal_datetime)}</td>
+      <td>${hangCellHtml}</td>
+      <td>${removalCellHtml}</td>
       <td>${row.days}</td>
       <td>${row.rate}</td>
       <td>${row.amount.toLocaleString('ru-RU')}</td>
+      <td class="actions-cell">${actionsHtml}</td>
     `;
     body.appendChild(tr);
   });
   document.getElementById('report-total').textContent =
     'Итого: ' + data.total_amount.toLocaleString('ru-RU') + ' тенге (' + data.rows.length + ' рейсов)';
 }
+
+function toggleBillingRowEdit(rowKey) {
+  const key = 'b' + rowKey;
+  if (editingReportRows.has(key)) editingReportRows.delete(key);
+  else editingReportRows.add(key);
+  loadBillingReport();
+}
+
+async function saveBillingRowEdit(tripId, fromStopId, toStopId) {
+  const hang = document.getElementById('bill-hang-' + toStopId).value;
+  const removal = document.getElementById('bill-removal-' + toStopId).value;
+
+  const results = await Promise.all([
+    fetch(`/trips/${tripId}/stops/${fromStopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({completed_at: hang || null}),
+    }),
+    fetch(`/trips/${tripId}/stops/${toStopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({completed_at: removal || null}),
+    }),
+  ]);
+  if (results.every(r => r.status === 200)) {
+    editingReportRows.delete('b' + toStopId);
+    loadBillingReport();
+  } else {
+    alert('Ошибка при сохранении');
+  }
+}
+
 
 let editingReportRows = new Set();
 
@@ -1634,13 +1683,13 @@ async function loadBoardMovementReport() {
     const isEditing = rowKey && editingReportRows.has(rowKey);
 
     const zpuCellHtml = isEditing
-      ? `<input id="rep-zpu-${rowKey}" value="${row.zpu_number || ''}" style="width:90px">`
+      ? `<input id="rep-zpu-${rowKey}" value="${row.zpu_number || ''}" style="width:70px; font-size:12px; padding:2px 4px">`
       : (row.zpu_number || '—');
     const arrivalCellHtml = isEditing
-      ? `<input id="rep-arrival-${rowKey}" type="datetime-local" value="${row.arrival_datetime ? row.arrival_datetime.slice(0,16) : ''}" style="width:150px">`
+      ? `<input id="rep-arrival-${rowKey}" type="datetime-local" value="${row.arrival_datetime ? row.arrival_datetime.slice(0,16) : ''}" style="width:126px; font-size:12px; padding:2px 4px">`
       : fmtDate(row.arrival_datetime);
     const removalCellHtml = isEditing
-      ? `<input id="rep-removal-${rowKey}" type="datetime-local" value="${row.removal_datetime ? row.removal_datetime.slice(0,16) : ''}" style="width:150px">`
+      ? `<input id="rep-removal-${rowKey}" type="datetime-local" value="${row.removal_datetime ? row.removal_datetime.slice(0,16) : ''}" style="width:126px; font-size:12px; padding:2px 4px">`
       : fmtDate(row.removal_datetime);
     const actionsHtml = !rowKey ? '' : (isEditing
       ? `<button onclick="saveReportRowEdit(${row.trip_id}, ${row.from_stop_id}, ${row.to_stop_id})">Сохранить</button>
@@ -4135,7 +4184,7 @@ def db_get_ezpu_billing_report(contractor_name, year=None, month=None, rate=DEFA
         cur.execute(
             """
             SELECT t.id, t.board_number, d.serial_number, t.hang_datetime,
-                   ts.sequence, ts.location, ts.completed_at
+                   ts.id, ts.sequence, ts.location, ts.completed_at
             FROM trips t
             JOIN devices d ON d.id = t.ezpu_device_id
             JOIN parties p ON p.id = t.contractor_id
@@ -4151,9 +4200,9 @@ def db_get_ezpu_billing_report(contractor_name, year=None, month=None, rate=DEFA
 
     # группируем строки по рейсу
     trips_map = {}
-    for trip_id, board, serial, hang_dt, seq, location, completed_at in rows_raw:
+    for trip_id, board, serial, hang_dt, stop_id, seq, location, completed_at in rows_raw:
         info = trips_map.setdefault(trip_id, {"board": board, "serial": serial, "hang_dt": hang_dt, "stops": []})
-        info["stops"].append({"seq": seq, "location": location, "completed_at": completed_at})
+        info["stops"].append({"stop_id": stop_id, "seq": seq, "location": location, "completed_at": completed_at})
 
     # каждое ПРОЙДЕННОЕ плечо (пара соседних точек, у которых обе отметки
     # исполнены) - отдельная строка отчёта, даже если весь рейс ещё не закрыт
@@ -4174,6 +4223,7 @@ def db_get_ezpu_billing_report(contractor_name, year=None, month=None, rate=DEFA
                 "origin": a["location"], "destination": b["location"],
                 "hang_datetime": a["completed_at"], "removal_datetime": b["completed_at"],
                 "days": days, "rate": rate, "amount": amount,
+                "from_stop_id": a["stop_id"], "to_stop_id": b["stop_id"],
             })
             num += 1
 
