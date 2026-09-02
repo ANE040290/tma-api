@@ -377,6 +377,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .trip-status-исполнено { background: #dcfce7; color: #166534; }
   .trip-status-снят { background: #dcfce7; color: #166534; }
   .trip-status-в-пути { background: #dbeafe; color: #1e40af; }
+  .trip-status-перенос { background: #fef3c7; color: #92400e; }
+  .trip-status-отменен { background: #fee2e2; color: #991b1b; }
+  .trip-status-ошибочно_закрыт { background: #e5e7eb; color: #4b5563; }
   .trip-main-row { font-weight: 600; }
   .trip-main-row td { background: linear-gradient(to bottom, #f3f4f6, #f8fafc); border-top: 2px solid #cbd5e1; padding-top: 12px; padding-bottom: 12px; }
   .trip-main-row td:first-child { border-left: 3px solid #1f2937; }
@@ -1026,8 +1029,11 @@ async function loadTrips() {
         : (legDone && leg.toStop && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '');
       const statusCellHtml = editingStop
         ? `<select id="edit-status-${leg.toStop.id}" onclick="event.stopPropagation()">
-             <option value="ожидание" ${leg.toStop.status === 'ожидание' ? 'selected' : ''}>ожидание</option>
-             <option value="исполнено" ${leg.toStop.status === 'исполнено' ? 'selected' : ''}>исполнено</option>
+             <option value="ожидание" ${leg.toStop.status === 'ожидание' ? 'selected' : ''}>Ожидание</option>
+             <option value="исполнено" ${leg.toStop.status === 'исполнено' ? 'selected' : ''}>Исполнено</option>
+             <option value="перенос" ${leg.toStop.status === 'перенос' ? 'selected' : ''}>Перенос</option>
+             <option value="отменен" ${leg.toStop.status === 'отменен' ? 'selected' : ''}>Отменен</option>
+             <option value="ошибочно_закрыт" ${leg.toStop.status === 'ошибочно_закрыт' ? 'selected' : ''}>Ошибочно закрыт</option>
            </select>`
         : (leg.toStop ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>' : '');
 
@@ -2172,7 +2178,10 @@ def db_set_stop_zpu(trip_id, stop_id, zpu_number):
 def db_update_stop(trip_id, stop_id, fields):
     """Универсальное редактирование точки маршрута - любое из полей:
     location, zpu_number, status, completed_at, arrived_at.
-    Незаданные поля (None в fields) не трогаются."""
+    Незаданные поля (None в fields) не трогаются.
+    Если статус ставится в 'перенос' или 'отменен' - рейс целиком
+    переводится в закрытые (эти решения логистов означают, что
+    активно отслеживать этот рейс дальше не нужно)."""
     allowed = {"location", "zpu_number", "status", "completed_at", "arrived_at"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
@@ -2187,8 +2196,19 @@ def db_update_stop(trip_id, stop_id, fields):
             params,
         )
         row = cur.fetchone()
+        if row is None:
+            conn.commit()
+            return False
+
+        if updates.get("status") in ("перенос", "отменен"):
+            almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+            cur.execute(
+                "UPDATE trips SET status = 'снят', removal_datetime = COALESCE(removal_datetime, %s), updated_at = now() WHERE id = %s",
+                (datetime.datetime.now(almaty_tz), trip_id),
+            )
+
         conn.commit()
-        return row is not None
+        return True
     except Exception:
         conn.rollback()
         raise
@@ -4113,7 +4133,7 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         cur.execute(
             """
             SELECT t.id, t.board_number, t.warehouse, d.serial_number, t.hang_datetime,
-                   ts.id, ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at
+                   ts.id, ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at, ts.status
             FROM trips t
             LEFT JOIN devices d ON d.id = t.ezpu_device_id
             JOIN parties p ON p.id = t.contractor_id
@@ -4128,13 +4148,13 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         conn.close()
 
     trips_map = {}
-    for trip_id, board, warehouse, serial, hang_dt, stop_id, seq, location, zpu, arrived_at, completed_at in rows_raw:
+    for trip_id, board, warehouse, serial, hang_dt, stop_id, seq, location, zpu, arrived_at, completed_at, status in rows_raw:
         info = trips_map.setdefault(trip_id, {
             "board": board, "warehouse": warehouse, "serial": serial, "hang_dt": hang_dt, "stops": [],
         })
         info["stops"].append({
             "stop_id": stop_id, "seq": seq, "location": location, "zpu": zpu,
-            "arrived_at": arrived_at, "completed_at": completed_at,
+            "arrived_at": arrived_at, "completed_at": completed_at, "status": status,
         })
 
     rows = []
@@ -4143,11 +4163,17 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         stops = sorted(info["stops"], key=lambda s: s["seq"])
         for i in range(len(stops) - 1):
             a, b = stops[i], stops[i + 1]
+            if b["status"] == "ошибочно_закрыт":
+                # ложное срабатывание (напр. по ошибке сняли не ту пломбу) -
+                # реального заезда на базу не было, в отчёт не включаем
+                continue
             hang_time = a["completed_at"] or (info["hang_dt"] if i == 0 else None)
 
             note = ""
             if b["arrived_at"]:
                 note = "ок" if b["arrived_at"].hour < arrival_cutoff_hour else "позднее прибытие"
+            elif b["status"] in ("перенос", "отменен"):
+                note = b["status"]
 
             rows.append({
                 "num": num, "trip_id": trip_id, "board_number": info["board"],
@@ -5667,8 +5693,9 @@ class Handler(BaseHTTPRequestHandler):
             fields["zpu_number"] = (body.get("zpu_number") or "").strip() or None
         if "status" in body:
             status_val = (body.get("status") or "").strip()
-            if status_val not in ("ожидание", "исполнено"):
-                self._send_json({"error": "status должен быть 'ожидание' или 'исполнено'"}, status=400)
+            valid_statuses = ("ожидание", "исполнено", "перенос", "отменен", "ошибочно_закрыт")
+            if status_val not in valid_statuses:
+                self._send_json({"error": f"status должен быть одним из: {', '.join(valid_statuses)}"}, status=400)
                 return
             fields["status"] = status_val
         for dt_field in ("completed_at", "arrived_at"):
