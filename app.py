@@ -702,7 +702,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>№</th><th>Борт</th><th>Склад</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Откуда</th><th>Куда</th>
-        <th>Навешено</th><th>Прибыл на базу</th><th>Снято</th><th>Примечание</th>
+        <th>Навешено</th><th>Прибыл на базу</th><th>Снято</th><th>Примечание</th><th></th>
       </tr></thead>
       <tbody id="report-movement-body"></tbody>
     </table>
@@ -1019,7 +1019,7 @@ async function loadTrips() {
         ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
         : leg.to;
       const timeCellHtml = editingStop
-        ? `<input id="edit-time-${leg.toStop.id}" type="datetime-local" value="${leg.toStop.completed_at ? leg.toStop.completed_at.slice(0, 16) : ''}" onclick="event.stopPropagation()">`
+        ? `<input id="edit-time-${leg.toStop.id}" type="datetime-local" value="${leg.toStop.completed_at ? leg.toStop.completed_at.slice(0, 16) : ''}" style="width:150px" onclick="event.stopPropagation()">`
         : (legDone && leg.toStop && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '');
       const statusCellHtml = editingStop
         ? `<select id="edit-status-${leg.toStop.id}" onclick="event.stopPropagation()">
@@ -1613,36 +1613,86 @@ async function loadBillingReport() {
     'Итого: ' + data.total_amount.toLocaleString('ru-RU') + ' тенге (' + data.rows.length + ' рейсов)';
 }
 
+let editingReportRows = new Set();
+
 async function loadBoardMovementReport() {
   const params = _movementReportParams();
   const r = await fetch('/reports/board-movement?' + params.toString());
   const data = await r.json();
+  window._lastMovementRows = data.rows || [];
   const body = document.getElementById('report-movement-body');
   body.innerHTML = '';
   if (!data.rows || !data.rows.length) {
-    body.innerHTML = '<tr><td colspan="11" style="color:#888">Нет данных за этот период</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" style="color:#888">Нет данных за этот период</td></tr>';
     document.getElementById('report-total').textContent = '';
     return;
   }
   data.rows.forEach(row => {
     const noteColor = row.note === 'позднее прибытие' ? '#991b1b' : (row.note === 'ок' ? '#166534' : '#888');
     const tr = document.createElement('tr');
+    const rowKey = row.to_stop_id;
+    const isEditing = rowKey && editingReportRows.has(rowKey);
+
+    const zpuCellHtml = isEditing
+      ? `<input id="rep-zpu-${rowKey}" value="${row.zpu_number || ''}" style="width:90px">`
+      : (row.zpu_number || '—');
+    const arrivalCellHtml = isEditing
+      ? `<input id="rep-arrival-${rowKey}" type="datetime-local" value="${row.arrival_datetime ? row.arrival_datetime.slice(0,16) : ''}" style="width:150px">`
+      : fmtDate(row.arrival_datetime);
+    const removalCellHtml = isEditing
+      ? `<input id="rep-removal-${rowKey}" type="datetime-local" value="${row.removal_datetime ? row.removal_datetime.slice(0,16) : ''}" style="width:150px">`
+      : fmtDate(row.removal_datetime);
+    const actionsHtml = !rowKey ? '' : (isEditing
+      ? `<button onclick="saveReportRowEdit(${row.trip_id}, ${row.from_stop_id}, ${row.to_stop_id})">Сохранить</button>
+         <button class="secondary" onclick="toggleReportRowEdit(${rowKey})">Отмена</button>`
+      : `<button class="secondary" onclick="toggleReportRowEdit(${rowKey})">✏️</button>`);
+
     tr.innerHTML = `
       <td>${row.num}</td>
       <td>${row.board_number || '—'}</td>
       <td>${row.warehouse || '—'}</td>
       <td>${row.ezpu_serial || '—'}</td>
-      <td>${row.zpu_number || '—'}</td>
+      <td>${zpuCellHtml}</td>
       <td>${row.origin || '—'}</td>
       <td>${row.destination || '—'}</td>
       <td>${fmtDate(row.hang_datetime)}</td>
-      <td>${fmtDate(row.arrival_datetime)}</td>
-      <td>${fmtDate(row.removal_datetime)}</td>
+      <td>${arrivalCellHtml}</td>
+      <td>${removalCellHtml}</td>
       <td style="color:${noteColor}">${row.note || '—'}</td>
+      <td class="actions-cell">${actionsHtml}</td>
     `;
     body.appendChild(tr);
   });
   document.getElementById('report-total').textContent = 'Всего строк: ' + data.rows.length;
+}
+
+function toggleReportRowEdit(rowKey) {
+  if (editingReportRows.has(rowKey)) editingReportRows.delete(rowKey);
+  else editingReportRows.add(rowKey);
+  loadBoardMovementReport();
+}
+
+async function saveReportRowEdit(tripId, fromStopId, toStopId) {
+  const zpu = document.getElementById('rep-zpu-' + toStopId).value.trim();
+  const arrival = document.getElementById('rep-arrival-' + toStopId).value;
+  const removal = document.getElementById('rep-removal-' + toStopId).value;
+
+  const results = await Promise.all([
+    fetch(`/trips/${tripId}/stops/${fromStopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({zpu_number: zpu || null}),
+    }),
+    fetch(`/trips/${tripId}/stops/${toStopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({arrived_at: arrival || null, completed_at: removal || null}),
+    }),
+  ]);
+  if (results.every(r => r.status === 200)) {
+    editingReportRows.delete(toStopId);
+    loadBoardMovementReport();
+  } else {
+    alert('Ошибка при сохранении одного или нескольких полей');
+  }
 }
 
 function handleImportFile(event) {
@@ -4014,7 +4064,7 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         cur.execute(
             """
             SELECT t.id, t.board_number, t.warehouse, d.serial_number, t.hang_datetime,
-                   ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at
+                   ts.id, ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at
             FROM trips t
             LEFT JOIN devices d ON d.id = t.ezpu_device_id
             JOIN parties p ON p.id = t.contractor_id
@@ -4029,12 +4079,12 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         conn.close()
 
     trips_map = {}
-    for trip_id, board, warehouse, serial, hang_dt, seq, location, zpu, arrived_at, completed_at in rows_raw:
+    for trip_id, board, warehouse, serial, hang_dt, stop_id, seq, location, zpu, arrived_at, completed_at in rows_raw:
         info = trips_map.setdefault(trip_id, {
             "board": board, "warehouse": warehouse, "serial": serial, "hang_dt": hang_dt, "stops": [],
         })
         info["stops"].append({
-            "seq": seq, "location": location, "zpu": zpu,
+            "stop_id": stop_id, "seq": seq, "location": location, "zpu": zpu,
             "arrived_at": arrived_at, "completed_at": completed_at,
         })
 
@@ -4056,6 +4106,7 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
                 "origin": a["location"], "destination": b["location"],
                 "hang_datetime": hang_time, "arrival_datetime": b["arrived_at"],
                 "removal_datetime": b["completed_at"], "note": note,
+                "from_stop_id": a["stop_id"], "to_stop_id": b["stop_id"],
             })
             num += 1
 
