@@ -224,6 +224,98 @@ def db_create_operation(payload):
         conn.close()
 
 
+REPORT_VIEW_HTML = r"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Отчёт</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #f5f6fa; margin: 0; padding: 24px; color: #111; }
+  h2 { margin: 0 0 20px; }
+  .filters { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 20px; background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .field label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
+  .field input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+  button { padding: 8px 16px; border: none; border-radius: 6px; background: #1e40af; color: #fff; cursor: pointer; font-size: 14px; }
+  button.secondary { background: #e5e7eb; color: #111; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  th { background: #1e40af; color: #fff; padding: 10px; text-align: left; font-size: 13px; }
+  td { padding: 9px 10px; border-top: 1px solid #eee; font-size: 13px; }
+  tr:hover td { background: #fafafa; }
+</style>
+</head>
+<body>
+<h2 id="report-title">Отчёт</h2>
+<div class="filters">
+  <div class="field"><label>С</label><input id="date-from" type="date"></div>
+  <div class="field"><label>По</label><input id="date-to" type="date"></div>
+  <button onclick="loadReport()">Показать</button>
+  <button class="secondary" onclick="exportReport()">Скачать Excel</button>
+</div>
+<div style="overflow-x:auto">
+<table>
+  <thead><tr>
+    <th>№</th><th>Борт</th><th>Склад</th><th>ЭЗПУ</th><th>№ ЗПУ</th><th>Откуда</th><th>Куда</th>
+    <th>Навешено</th><th>Прибыл на базу</th><th>Снято</th><th>Примечание</th>
+  </tr></thead>
+  <tbody id="report-body"></tbody>
+</table>
+</div>
+<script>
+const TOKEN = window.location.pathname.split('/').pop();
+
+function fmtDate(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  return d.toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+
+async function loadReport() {
+  const dateFrom = document.getElementById('date-from').value;
+  const dateTo = document.getElementById('date-to').value;
+  const params = new URLSearchParams({date_from: dateFrom, date_to: dateTo});
+  const r = await fetch('/report-view/' + TOKEN + '/data?' + params.toString());
+  const data = await r.json();
+  document.getElementById('report-title').textContent = 'Отчёт — ' + (data.contractor || '');
+  const body = document.getElementById('report-body');
+  body.innerHTML = '';
+  if (!data.rows || !data.rows.length) {
+    body.innerHTML = '<tr><td colspan="11" style="color:#888">Нет данных за этот период</td></tr>';
+    return;
+  }
+  data.rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${row.num}</td><td>${row.board_number || '—'}</td><td>${row.warehouse || '—'}</td>
+      <td>${row.ezpu_serial || '—'}</td><td>${row.zpu_number || '—'}</td>
+      <td>${row.origin || '—'}</td><td>${row.destination || '—'}</td>
+      <td>${fmtDate(row.hang_datetime)}</td><td>${fmtDate(row.arrival_datetime)}</td>
+      <td>${fmtDate(row.removal_datetime)}</td><td>${row.note || '—'}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function exportReport() {
+  const dateFrom = document.getElementById('date-from').value;
+  const dateTo = document.getElementById('date-to').value;
+  const params = new URLSearchParams({date_from: dateFrom, date_to: dateTo});
+  window.open('/report-view/' + TOKEN + '/export?' + params.toString(), '_blank');
+}
+
+(function init() {
+  const today = new Date();
+  const monthAgo = new Date(today);
+  monthAgo.setDate(monthAgo.getDate() - 30);
+  document.getElementById('date-to').value = today.toISOString().slice(0, 10);
+  document.getElementById('date-from').value = monthAgo.toISOString().slice(0, 10);
+  loadReport();
+})();
+</script>
+</body>
+</html>
+"""
+
+
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -2370,6 +2462,56 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(min(1, a ** 0.5))
 
 
+def db_create_report_share(contractor_name, report_type="movement", label=None):
+    import secrets
+    token = secrets.token_urlsafe(24)
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO report_shares (token, contractor_name, report_type, label) VALUES (%s, %s, %s, %s)",
+            (token, contractor_name, report_type, label),
+        )
+        conn.commit()
+        return token
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_get_report_share(token):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT contractor_name, report_type, label FROM report_shares WHERE token = %s",
+            (token,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"contractor_name": row[0], "report_type": row[1], "label": row[2]}
+    finally:
+        conn.close()
+
+
+def db_list_report_shares():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT token, contractor_name, report_type, label, created_at FROM report_shares ORDER BY created_at DESC"
+        )
+        return [
+            {"token": r[0], "contractor_name": r[1], "report_type": r[2], "label": r[3], "created_at": r[4].isoformat() if r[4] else None}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
 def db_get_distinct_dropoff_locations():
     conn = get_connection()
     try:
@@ -4076,12 +4218,64 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
 
         _public_paths = ("/health", "/wialon/webhook")
-        if path not in _public_paths:
+        if path not in _public_paths and not path.startswith("/report-view/"):
             if not self._check_auth():
                 return
 
         if path in ("/dashboard", "/"):
             self._send_html(DASHBOARD_HTML)
+            return
+
+        if path.startswith("/report-view/"):
+            parts = path[len("/report-view/"):].split("/")
+            token = parts[0]
+            sub = parts[1] if len(parts) > 1 else None
+
+            share = db_get_report_share(token)
+            if not share:
+                self._send_html("<h3>Ссылка недействительна</h3>", status=404)
+                return
+
+            date_from_raw = qs.get("date_from", [None])[0]
+            date_to_raw = qs.get("date_to", [None])[0]
+            date_from = date_to = None
+            if date_from_raw and date_to_raw:
+                try:
+                    date_from = datetime.date.fromisoformat(date_from_raw)
+                    date_to = datetime.date.fromisoformat(date_to_raw)
+                except ValueError:
+                    pass
+            if not date_from or not date_to:
+                today = datetime.date.today()
+                date_to = today
+                date_from = today - datetime.timedelta(days=30)
+
+            if sub == "data":
+                try:
+                    report = db_get_board_movement_report(share["contractor_name"], date_from=date_from, date_to=date_to)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+                    return
+                self._send_json(report)
+                return
+
+            if sub == "export":
+                try:
+                    report = db_get_board_movement_report(share["contractor_name"], date_from=date_from, date_to=date_to)
+                    xlsx_bytes = build_board_movement_xlsx(report)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition", 'attachment; filename="dvizhenie_bortov.xlsx"')
+                self.send_header("Content-Length", str(len(xlsx_bytes)))
+                self.end_headers()
+                self.wfile.write(xlsx_bytes)
+                return
+
+            # без sub - сама страница
+            self._send_html(REPORT_VIEW_HTML)
             return
 
         if path == "/health":
@@ -4481,6 +4675,17 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == "/report-shares":
+            try:
+                shares = db_list_report_shares()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            for s in shares:
+                s["url"] = f"/report-view/{s['token']}"
+            self._send_json({"count": len(shares), "shares": shares})
+            return
+
         if path == "/wialon/zone-coverage":
             try:
                 result = wialon_check_zone_coverage()
@@ -4786,6 +4991,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
                 return
             self._send_json({"status": "ok", "location_name": location_name, "zone_name": zone_name})
+            return
+
+        if path == "/report-shares":
+            try:
+                body = self._read_json_body()
+            except json.JSONDecodeError:
+                self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+                return
+            contractor_name = body.get("contractor_name")
+            label = body.get("label")
+            if not contractor_name:
+                self._send_json({"error": "Укажите contractor_name"}, status=400)
+                return
+            try:
+                token = db_create_report_share(contractor_name, report_type="movement", label=label)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            self._send_json({
+                "token": token, "contractor_name": contractor_name,
+                "url": f"/report-view/{token}",
+            })
             return
 
         if path == "/biglock/reconcile-trip":
