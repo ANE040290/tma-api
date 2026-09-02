@@ -902,7 +902,7 @@ async function loadTrips() {
     if (legs.length === 0) {
       legs.push({from: '—', to: '—', fromStop: null, toStop: null});
     }
-    const expanded = legs.length <= 1 ? true : expandedTrips.has(t.id);
+    const expanded = expandedTrips.has(t.id);
 
     // Контроль повторяющихся номеров ЗПУ внутри рейса - считаем, сколько
     // раз встречается каждый номер среди всех точек, чтобы подсветить
@@ -965,7 +965,7 @@ async function loadTrips() {
       <td style="font-size:12px">
         <div><b>Откуда:</b></div>${pickupsList}
         <div style="margin-top:4px"><b>Куда:</b></div>${dropoffsList}
-        ${legs.length > 1 ? `<button class="secondary" style="margin-top:6px; font-size:11px" onclick="event.stopPropagation(); toggleLegs(${t.id})">${expanded ? '▼ Скрыть плечи' : '▶ Показать плечи (' + legs.length + ')'}</button>` : ''}
+        ${legs.length >= 1 ? `<button class="secondary" style="margin-top:6px; font-size:11px" onclick="event.stopPropagation(); toggleLegs(${t.id})">${expanded ? '▼ Скрыть плечи' : '▶ Показать плечи (' + legs.length + ')'}</button>` : ''}
       </td>
       <td style="font-size:12px">
         Навешена:<br>${fmtDate(t.hang_datetime)}<br>
