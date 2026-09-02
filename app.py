@@ -868,6 +868,7 @@ function toggleLegs(id) {
 }
 
 let editingZpuStops = new Set();
+let editingStops = new Set();
 
 function statusClass(status) {
   return 'trip-status-' + String(status).toLowerCase().replace(/\s+/g, '-');
@@ -987,11 +988,13 @@ async function loadTrips() {
       const zpuStopId = leg.fromStop ? leg.fromStop.id : null;
       const editingZpu = zpuStopId && editingZpuStops.has(zpuStopId);
 
+      const editingStop = leg.toStop && editingStops.has(leg.toStop.id);
+
       const legActions = [];
-      if (leg.toStop && !legDone) {
+      if (leg.toStop && !legDone && !editingStop) {
         legActions.push(`<button class="secondary" onclick="event.stopPropagation(); completeStop(${t.id}, ${leg.toStop.id})">Исполнено</button>`);
       }
-      if (zpuStopId && !editingZpu) {
+      if (zpuStopId && !editingZpu && !editingStop) {
         const zpuLabel = leg.fromStop.zpu_number ? 'Изменить № ЗПУ' : 'Назначить № ЗПУ';
         legActions.push(`<button class="secondary" onclick="event.stopPropagation(); startEditZpu(${zpuStopId})">${zpuLabel}</button>`);
       }
@@ -999,24 +1002,38 @@ async function loadTrips() {
         legActions.push(`<button onclick="event.stopPropagation(); saveZpu(${t.id}, ${zpuStopId})">Сохранить ЗПУ</button>`);
         legActions.push(`<button class="secondary" onclick="event.stopPropagation(); cancelEditZpu(${zpuStopId})">Отмена</button>`);
       }
-      if (leg.toStop) {
-        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); editStopField(${t.id}, ${leg.toStop.id}, '${(leg.to || '').replace(/'/g, "\\'")}')">Название</button>`);
-        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); editStopTime(${t.id}, ${leg.toStop.id}, 'completed_at', 'Время снятия')">Время снятия</button>`);
-        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); addStopAfter(${t.id}, ${leg.toStop.id})">+ Точка после</button>`);
-        legActions.push(`<button class="secondary" style="color:#991b1b" onclick="event.stopPropagation(); deleteStop(${t.id}, ${leg.toStop.id}, '${(leg.to || '').replace(/'/g, "\\'")}')">Удалить точку</button>`);
+      if (leg.toStop && !editingStop) {
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); toggleEditStop(${leg.toStop.id})">✏️ Редактировать</button>`);
+        legActions.push(`<button class="secondary" title="Добавить точку после" onclick="event.stopPropagation(); addStopAfter(${t.id}, ${leg.toStop.id})">➕</button>`);
+        legActions.push(`<button class="secondary" style="color:#991b1b" title="Удалить точку" onclick="event.stopPropagation(); deleteStop(${t.id}, ${leg.toStop.id}, '${(leg.to || '').replace(/'/g, "\\'")}')">🗑️</button>`);
+      }
+      if (editingStop) {
+        legActions.push(`<button onclick="event.stopPropagation(); saveStopEdit(${t.id}, ${leg.toStop.id})">Сохранить</button>`);
+        legActions.push(`<button class="secondary" onclick="event.stopPropagation(); toggleEditStop(${leg.toStop.id})">Отмена</button>`);
       }
 
       const legZpuValue = leg.fromStop ? leg.fromStop.zpu_number : null;
       const isDuplicateZpu = legZpuValue && zpuCounts[legZpuValue] > 1;
 
+      const toCellHtml = editingStop
+        ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
+        : leg.to;
+      const timeCellHtml = editingStop
+        ? `<input id="edit-time-${leg.toStop.id}" type="datetime-local" value="${leg.toStop.completed_at ? leg.toStop.completed_at.slice(0, 16) : ''}" onclick="event.stopPropagation()">`
+        : (legDone && leg.toStop && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '');
+      const statusCellHtml = editingStop
+        ? `<select id="edit-status-${leg.toStop.id}" onclick="event.stopPropagation()">
+             <option value="ожидание" ${leg.toStop.status === 'ожидание' ? 'selected' : ''}>ожидание</option>
+             <option value="исполнено" ${leg.toStop.status === 'исполнено' ? 'selected' : ''}>исполнено</option>
+           </select>`
+        : (leg.toStop ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>' : '');
+
       tr.innerHTML = `
         <td>${num}</td>
         <td style="font-size:12px"><span style="color:#888">ЗПУ:</span> <b style="color:${isDuplicateZpu ? '#dc2626' : '#111'}; font-size:14px">${zpuCell(leg, editingZpu, zpuStopId)}${isDuplicateZpu ? ' ⚠️' : ''}</b></td>
-        <td>${leg.from} → ${leg.to}</td>
-        <td style="font-size:12px">${legDone && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : ''}</td>
-        <td>${leg.toStop
-          ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>'
-          : ''}</td>
+        <td>${leg.from} → ${toCellHtml}</td>
+        <td style="font-size:12px">${timeCellHtml}</td>
+        <td>${statusCellHtml}</td>
         <td class="actions-cell">${legActions.join('')}</td>
       `;
       body.appendChild(tr);
@@ -1025,28 +1042,32 @@ async function loadTrips() {
   document.getElementById('trip-count-label').textContent = trips.length + ' рейсов' + (hideCompleted ? ' (без завершённых)' : '');
 }
 
-async function editStopField(tripId, stopId, currentLocation) {
-  const newLocation = prompt('Название точки:', currentLocation);
-  if (newLocation === null || !newLocation.trim()) return;
-  const r = await fetch(`/trips/${tripId}/stops/${stopId}/update`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({location: newLocation.trim()}),
-  });
-  if (r.status === 200) { loadTrips(); }
-  else { const d = await r.json(); alert(d.error || 'Ошибка обновления'); }
+function toggleEditStop(stopId) {
+  if (editingStops.has(stopId)) {
+    editingStops.delete(stopId);
+  } else {
+    editingStops.add(stopId);
+  }
+  loadTrips();
 }
 
-async function editStopTime(tripId, stopId, field, label) {
-  const val = prompt(label + '\n(формат: ГГГГ-ММ-ДДTЧЧ:ММ, например 2026-08-10T14:30; оставьте пустым чтобы очистить)');
-  if (val === null) return;
-  const body = {};
-  body[field] = val.trim() || null;
+async function saveStopEdit(tripId, stopId) {
+  const location = document.getElementById('edit-loc-' + stopId).value.trim();
+  const timeVal = document.getElementById('edit-time-' + stopId).value;
+  const status = document.getElementById('edit-status-' + stopId).value;
+  const body = {location, status};
+  body.completed_at = timeVal || null;
   const r = await fetch(`/trips/${tripId}/stops/${stopId}/update`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   });
-  if (r.status === 200) { loadTrips(); }
-  else { const d = await r.json(); alert(d.error || 'Ошибка обновления'); }
+  if (r.status === 200) {
+    editingStops.delete(stopId);
+    loadTrips();
+  } else {
+    const d = await r.json();
+    alert(d.error || 'Ошибка обновления');
+  }
 }
 
 async function addStopAfter(tripId, afterStopId) {
