@@ -4035,6 +4035,8 @@ def build_ezpu_billing_xlsx(report):
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+
     def fmt_dt(raw):
         if not raw:
             return ""
@@ -4043,6 +4045,9 @@ def build_ezpu_billing_xlsx(report):
                 raw = datetime.datetime.fromisoformat(raw)
             except ValueError:
                 return raw
+        if raw.tzinfo is None:
+            raw = raw.replace(tzinfo=datetime.timezone.utc)
+        raw = raw.astimezone(almaty_tz)
         return raw.strftime("%d.%m.%Y %H:%M")
 
     for row in report.get("rows", []):
@@ -4090,6 +4095,8 @@ def build_board_movement_xlsx(report):
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+    almaty_tz = datetime.timezone(datetime.timedelta(hours=5))
+
     def fmt_dt(raw):
         if not raw:
             return ""
@@ -4098,6 +4105,9 @@ def build_board_movement_xlsx(report):
                 raw = datetime.datetime.fromisoformat(raw)
             except ValueError:
                 return raw
+        if raw.tzinfo is None:
+            raw = raw.replace(tzinfo=datetime.timezone.utc)
+        raw = raw.astimezone(almaty_tz)
         return raw.strftime("%d.%m.%Y %H:%M")
 
     for row in report.get("rows", []):
