@@ -1024,7 +1024,9 @@ async function loadTrips() {
       // Время навешивания ЭТОГО плеча: для первого плеча - это время
       // навешивания всего рейса, для остальных - время исполнения
       // предыдущей точки (когда там сняли/поставили новую пломбу)
-      const legHangTime = i === 0 ? t.hang_datetime : (leg.fromStop ? leg.fromStop.completed_at : null);
+      const legHangTime = i === 0
+        ? t.hang_datetime
+        : (leg.fromStop ? (leg.fromStop.completed_at || leg.fromStop.arrived_at) : null);
 
       const toCellHtml = editingStop
         ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
@@ -3766,7 +3768,12 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
         return {"trip_id": trip_id, "board_number": board_number, "action": "no_ezpu_on_trip"}
 
     case_id_partial = ezpu_serial[3:] if ezpu_serial.upper().startswith("GNS") else ezpu_serial
-    from_dt = (hang_datetime or datetime.datetime.now(datetime.timezone.utc)) - datetime.timedelta(days=1)
+    # Запас в 7 дней (не 1), потому что реальное время навешивания
+    # пломбы иногда оказывается РАНЬШЕ, чем hang_datetime самого
+    # рейса (например, пломба была подготовлена/поставлена заранее) -
+    # слишком узкое окно поиска однажды уже привело к тому, что
+    # реальная запись о снятии не находилась автоматикой
+    from_dt = (hang_datetime or datetime.datetime.now(datetime.timezone.utc)) - datetime.timedelta(days=7)
     from_dt_str = from_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_dt_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -4172,7 +4179,12 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
                 # ложное срабатывание (напр. по ошибке сняли не ту пломбу) -
                 # реального заезда на базу не было, в отчёт не включаем
                 continue
-            hang_time = a["completed_at"] or (info["hang_dt"] if i == 0 else None)
+            # Время навешивания этого плеча: сначала настоящее время
+            # закрытия предыдущей точки (completed_at), если его ещё
+            # нет - берём arrived_at (машина уже реально там, просто
+            # BigLock ещё не поймал снятие старой пломбы формально),
+            # и только для самого первого плеча - время начала рейса
+            hang_time = a["completed_at"] or a["arrived_at"] or (info["hang_dt"] if i == 0 else None)
 
             note = ""
             if b["arrived_at"]:
