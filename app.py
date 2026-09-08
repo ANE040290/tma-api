@@ -1026,7 +1026,7 @@ async function loadTrips() {
       // предыдущей точки (когда там сняли/поставили новую пломбу)
       const legHangTime = i === 0
         ? t.hang_datetime
-        : (leg.fromStop ? (leg.fromStop.completed_at || leg.fromStop.arrived_at) : null);
+        : (leg.fromStop ? (leg.fromStop.locked_at || leg.fromStop.completed_at || leg.fromStop.arrived_at) : null);
 
       const toCellHtml = editingStop
         ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
@@ -2305,12 +2305,12 @@ def db_get_trip(trip_id):
         if not r:
             return None
         cur.execute(
-            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number, arrived_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number, arrived_at, locked_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
         stops = [
             {"id": s[0], "stop_type": s[1], "sequence": s[2], "location": s[3], "status": s[4],
-             "completed_at": s[5], "zpu_number": s[6], "arrived_at": s[7]}
+             "completed_at": s[5], "zpu_number": s[6], "arrived_at": s[7], "locked_at": s[8]}
             for s in cur.fetchall()
         ]
         return {
@@ -2356,18 +2356,18 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at, arrived_at FROM trip_stops
+                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at, arrived_at, locked_at FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at, arrived_at in cur.fetchall():
+            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at, arrived_at, locked_at in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
                 stops_by_trip[trip_id][key].append({
                     "id": stop_id, "location": location, "status": st_status,
                     "sequence": sequence, "zpu_number": zpu, "completed_at": completed_at,
-                    "arrived_at": arrived_at,
+                    "arrived_at": arrived_at, "locked_at": locked_at,
                 })
 
         return [
@@ -3734,9 +3734,13 @@ def biglock_force_reconcile_trip(trip_id, board_number, opener=None):
             session = items_sorted[i]
             zpu = session.get("MechanicalDeviceCaseId")
             release_time = parse_dt(session.get("ReleaseTime"))
+            lock_time = parse_dt(session.get("LockTime"))
 
             if zpu and from_stop[4] != zpu:
-                cur.execute("UPDATE trip_stops SET zpu_number = %s WHERE id = %s", (zpu, from_stop[0]))
+                cur.execute(
+                    "UPDATE trip_stops SET zpu_number = %s, locked_at = %s WHERE id = %s",
+                    (zpu, lock_time, from_stop[0]),
+                )
                 changes.append(f"leg{i + 1}_zpu={zpu}")
 
             if release_time:
@@ -3896,10 +3900,16 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
             session = items_sorted[i]
             zpu = session.get("MechanicalDeviceCaseId")
             release_time = parse_dt(session.get("ReleaseTime"))
+            lock_time = parse_dt(session.get("LockTime"))
 
             if zpu and from_stop[4] != zpu:
-                cur.execute("UPDATE trip_stops SET zpu_number = %s WHERE id = %s", (zpu, from_stop[0]))
+                cur.execute(
+                    "UPDATE trip_stops SET zpu_number = %s, locked_at = %s WHERE id = %s",
+                    (zpu, lock_time, from_stop[0]),
+                )
                 changes.append(f"leg{i + 1}_zpu={zpu}")
+                if lock_time:
+                    changes.append(f"leg{i + 1}_locked_at={lock_time.isoformat()}")
 
             if release_time:
                 cur.execute(
@@ -4224,7 +4234,7 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         cur.execute(
             """
             SELECT t.id, t.board_number, t.warehouse, d.serial_number, t.hang_datetime,
-                   ts.id, ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at, ts.status
+                   ts.id, ts.sequence, ts.location, ts.zpu_number, ts.arrived_at, ts.completed_at, ts.status, ts.locked_at
             FROM trips t
             LEFT JOIN devices d ON d.id = t.ezpu_device_id
             JOIN parties p ON p.id = t.contractor_id
@@ -4239,13 +4249,13 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         conn.close()
 
     trips_map = {}
-    for trip_id, board, warehouse, serial, hang_dt, stop_id, seq, location, zpu, arrived_at, completed_at, status in rows_raw:
+    for trip_id, board, warehouse, serial, hang_dt, stop_id, seq, location, zpu, arrived_at, completed_at, status, locked_at in rows_raw:
         info = trips_map.setdefault(trip_id, {
             "board": board, "warehouse": warehouse, "serial": serial, "hang_dt": hang_dt, "stops": [],
         })
         info["stops"].append({
             "stop_id": stop_id, "seq": seq, "location": location, "zpu": zpu,
-            "arrived_at": arrived_at, "completed_at": completed_at, "status": status,
+            "arrived_at": arrived_at, "completed_at": completed_at, "status": status, "locked_at": locked_at,
         })
 
     rows = []
@@ -4258,12 +4268,13 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
                 # ложное срабатывание (напр. по ошибке сняли не ту пломбу) -
                 # реального заезда на базу не было, в отчёт не включаем
                 continue
-            # Время навешивания этого плеча: сначала настоящее время
-            # закрытия предыдущей точки (completed_at), если его ещё
-            # нет - берём arrived_at (машина уже реально там, просто
-            # BigLock ещё не поймал снятие старой пломбы формально),
-            # и только для самого первого плеча - время начала рейса
-            hang_time = a["completed_at"] or a["arrived_at"] or (info["hang_dt"] if i == 0 else None)
+            # Время навешивания этого плеча: сначала locked_at - это
+            # НАСТОЯЩЕЕ время постановки пломбы от BigLock (LockTime),
+            # если его ещё нет в данных (старые записи до этого
+            # исправления) - приближение через completed_at/arrived_at
+            # предыдущей точки, и только для первого плеча - время
+            # начала рейса
+            hang_time = a["locked_at"] or a["completed_at"] or a["arrived_at"] or (info["hang_dt"] if i == 0 else None)
 
             note = ""
             if b["arrived_at"]:
