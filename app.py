@@ -2858,6 +2858,75 @@ def wialon_check_zone_coverage():
     return result
 
 
+def db_audit_trips():
+    """Комплексная диагностика данных: проходит по всем рейсам и ищет
+    известные типы несогласованности (те самые, что находили и
+    чинили вручную): рейс 'снят', но не все точки 'исполнено';
+    повторяющиеся номера ЗПУ внутри рейса; removal_datetime рейса не
+    совпадает ни с одной точкой."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.id, t.board_number, t.status, t.removal_datetime,
+                   ts.id, ts.sequence, ts.stop_type, ts.location, ts.status, ts.zpu_number, ts.completed_at
+            FROM trips t
+            JOIN trip_stops ts ON ts.trip_id = t.id
+            ORDER BY t.id, ts.sequence
+            """
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    trips_map = {}
+    for trip_id, board, t_status, removal_dt, stop_id, seq, stop_type, location, s_status, zpu, completed_at in rows:
+        info = trips_map.setdefault(trip_id, {
+            "board": board, "status": t_status, "removal_dt": removal_dt, "stops": [],
+        })
+        info["stops"].append({
+            "id": stop_id, "seq": seq, "type": stop_type, "location": location,
+            "status": s_status, "zpu": zpu, "completed_at": completed_at,
+        })
+
+    issues = []
+    for trip_id, info in trips_map.items():
+        stops = sorted(info["stops"], key=lambda s: s["seq"])
+
+        # 1) рейс "снят", но не все точки "исполнено"
+        if info["status"] == "снят":
+            unfinished = [s for s in stops if s["status"] not in ("исполнено", "перенос", "отменен", "ошибочно_закрыт")]
+            if unfinished:
+                issues.append({
+                    "trip_id": trip_id, "board_number": info["board"], "type": "закрыт_но_есть_незавершённые_точки",
+                    "detail": f"рейс 'снят', но точки {[s['location'] for s in unfinished]} всё ещё '{unfinished[0]['status']}'",
+                })
+
+        # 2) повторяющиеся номера ЗПУ внутри рейса
+        zpu_seen = {}
+        for s in stops:
+            if s["zpu"]:
+                zpu_seen.setdefault(s["zpu"], []).append(s["location"])
+        for zpu, locations in zpu_seen.items():
+            if len(locations) > 1:
+                issues.append({
+                    "trip_id": trip_id, "board_number": info["board"], "type": "повторяющийся_номер_зпу",
+                    "detail": f"ЗПУ {zpu} встречается на точках: {locations}",
+                })
+
+        # 3) removal_datetime рейса не совпадает ни с одной точкой
+        if info["status"] == "снят" and info["removal_dt"]:
+            matches = [s for s in stops if s["completed_at"] == info["removal_dt"]]
+            if not matches:
+                issues.append({
+                    "trip_id": trip_id, "board_number": info["board"], "type": "время_снятия_не_совпадает",
+                    "detail": f"removal_datetime рейса ({info['removal_dt']}) не совпадает ни с одной точкой маршрута",
+                })
+
+    return issues
+
+
 def db_get_zone_aliases():
     conn = get_connection()
     try:
@@ -5008,6 +5077,18 @@ class Handler(BaseHTTPRequestHandler):
             for s in shares:
                 s["url"] = f"/report-view/{s['token']}"
             self._send_json({"count": len(shares), "shares": shares})
+            return
+
+        if path == "/diagnostics/trips-audit":
+            try:
+                issues = db_audit_trips()
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=500)
+                return
+            by_type = {}
+            for issue in issues:
+                by_type[issue["type"]] = by_type.get(issue["type"], 0) + 1
+            self._send_json({"count": len(issues), "by_type": by_type, "issues": issues})
             return
 
         if path == "/wialon/zone-coverage":
