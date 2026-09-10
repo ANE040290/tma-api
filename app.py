@@ -45,6 +45,7 @@ TRIP_ASSIGN_RE = re.compile(r"^/trips/(\d+)/assign-device$")
 TRIP_STOP_COMPLETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/complete$")
 TRIP_STOP_ARRIVE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/arrive$")
 TRIP_STOP_ZPU_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/zpu$")
+TRIP_UPDATE_HANG_RE = re.compile(r"^/trips/(\d+)/update-hang$")
 TRIP_STOP_UPDATE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/update$")
 TRIP_STOP_ADD_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/add-after$")
 TRIP_STOP_DELETE_RE = re.compile(r"^/trips/(\d+)/stops/(\d+)/delete$")
@@ -727,7 +728,25 @@ function fmtDate(s) {
   return d.toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
 }
 
-async function loadDevices() {
+// Для полей <input type="datetime-local"> нужно значение "как в Алматы"
+// (сервер отдаёт время в UTC) - иначе поле редактирования показывает
+// время на 5 часов раньше настоящего алматинского.
+function toAlmatyLocalInput(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  const almaty = new Date(d.getTime() + 5 * 60 * 60 * 1000);
+  return almaty.toISOString().slice(0, 16);
+}
+
+// Обратное преобразование: то, что пользователь ввёл в поле (это
+// алматинское время без явного часового пояса) - в ISO-строку с
+// явным +05:00, чтобы сервер не пытался угадывать пояс сам.
+function fromAlmatyLocalInput(val) {
+  if (!val) return null;
+  return val + ':00+05:00';
+}
+
+
   const search = document.getElementById('f-search').value.trim();
   const status = document.getElementById('f-status').value.trim();
   const type = document.getElementById('f-type').value;
@@ -1035,7 +1054,7 @@ async function loadTrips() {
         ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
         : leg.to;
       const timeCellHtml = editingStop
-        ? `<input id="edit-time-${leg.toStop.id}" type="datetime-local" value="${leg.toStop.completed_at ? leg.toStop.completed_at.slice(0, 16) : ''}" style="width:150px" onclick="event.stopPropagation()">`
+        ? `<input id="edit-time-${leg.toStop.id}" type="datetime-local" value="${toAlmatyLocalInput(leg.toStop.completed_at)}" style="width:150px" onclick="event.stopPropagation()">`
         : `Навешено:<br>${legHangTime ? fmtDate(legHangTime) : '—'}<br>Снято:<br>${legDone && leg.toStop && leg.toStop.completed_at ? fmtDate(leg.toStop.completed_at) : '—'}`;
       const statusCellHtml = editingStop
         ? `<select id="edit-status-${leg.toStop.id}" onclick="event.stopPropagation()">
@@ -1075,7 +1094,7 @@ async function saveStopEdit(tripId, stopId) {
   const timeVal = document.getElementById('edit-time-' + stopId).value;
   const status = document.getElementById('edit-status-' + stopId).value;
   const body = {location, status};
-  body.completed_at = timeVal || null;
+  body.completed_at = fromAlmatyLocalInput(timeVal);
   const r = await fetch(`/trips/${tripId}/stops/${stopId}/update`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
@@ -1619,10 +1638,10 @@ async function loadBillingReport() {
     const inputStyle = 'width:126px; font-size:12px; padding:2px 4px';
 
     const hangCellHtml = isEditing
-      ? `<input id="bill-hang-${rowKey}" type="datetime-local" value="${row.hang_datetime ? row.hang_datetime.slice(0,16) : ''}" style="${inputStyle}">`
+      ? `<input id="bill-hang-${rowKey}" type="datetime-local" value="${toAlmatyLocalInput(row.hang_datetime)}" style="${inputStyle}">`
       : fmtDate(row.hang_datetime);
     const removalCellHtml = isEditing
-      ? `<input id="bill-removal-${rowKey}" type="datetime-local" value="${row.removal_datetime ? row.removal_datetime.slice(0,16) : ''}" style="${inputStyle}">`
+      ? `<input id="bill-removal-${rowKey}" type="datetime-local" value="${toAlmatyLocalInput(row.removal_datetime)}" style="${inputStyle}">`
       : fmtDate(row.removal_datetime);
     const actionsHtml = !rowKey ? '' : (isEditing
       ? `<button onclick="saveBillingRowEdit(${row.trip_id}, ${row.from_stop_id}, ${row.to_stop_id})">Сохранить</button>
@@ -1662,11 +1681,11 @@ async function saveBillingRowEdit(tripId, fromStopId, toStopId) {
   const results = await Promise.all([
     fetch(`/trips/${tripId}/stops/${fromStopId}/update`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({completed_at: hang || null}),
+      body: JSON.stringify({completed_at: fromAlmatyLocalInput(hang)}),
     }),
     fetch(`/trips/${tripId}/stops/${toStopId}/update`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({completed_at: removal || null}),
+      body: JSON.stringify({completed_at: fromAlmatyLocalInput(removal)}),
     }),
   ]);
   if (results.every(r => r.status === 200)) {
@@ -1698,17 +1717,20 @@ async function loadBoardMovementReport() {
     const rowKey = row.to_stop_id;
     const isEditing = rowKey && editingReportRows.has(rowKey);
 
+    const hangCellHtml = isEditing
+      ? `<input id="rep-hang-${rowKey}" type="datetime-local" value="${toAlmatyLocalInput(row.hang_datetime)}" style="width:126px; font-size:12px; padding:2px 4px">`
+      : fmtDate(row.hang_datetime);
     const zpuCellHtml = isEditing
       ? `<input id="rep-zpu-${rowKey}" value="${row.zpu_number || ''}" style="width:70px; font-size:12px; padding:2px 4px">`
       : (row.zpu_number || '—');
     const arrivalCellHtml = isEditing
-      ? `<input id="rep-arrival-${rowKey}" type="datetime-local" value="${row.arrival_datetime ? row.arrival_datetime.slice(0,16) : ''}" style="width:126px; font-size:12px; padding:2px 4px">`
+      ? `<input id="rep-arrival-${rowKey}" type="datetime-local" value="${toAlmatyLocalInput(row.arrival_datetime)}" style="width:126px; font-size:12px; padding:2px 4px">`
       : fmtDate(row.arrival_datetime);
     const removalCellHtml = isEditing
-      ? `<input id="rep-removal-${rowKey}" type="datetime-local" value="${row.removal_datetime ? row.removal_datetime.slice(0,16) : ''}" style="width:126px; font-size:12px; padding:2px 4px">`
+      ? `<input id="rep-removal-${rowKey}" type="datetime-local" value="${toAlmatyLocalInput(row.removal_datetime)}" style="width:126px; font-size:12px; padding:2px 4px">`
       : fmtDate(row.removal_datetime);
     const actionsHtml = !rowKey ? '' : (isEditing
-      ? `<button onclick="saveReportRowEdit(${row.trip_id}, ${row.from_stop_id}, ${row.to_stop_id})">Сохранить</button>
+      ? `<button onclick="saveReportRowEdit(${row.trip_id}, ${row.from_stop_id}, ${row.to_stop_id}, ${row.is_first_leg})">Сохранить</button>
          <button class="secondary" onclick="toggleReportRowEdit(${rowKey})">Отмена</button>`
       : `<button class="secondary" onclick="toggleReportRowEdit(${rowKey})">✏️</button>`);
 
@@ -1720,7 +1742,7 @@ async function loadBoardMovementReport() {
       <td>${zpuCellHtml}</td>
       <td>${row.origin || '—'}</td>
       <td>${row.destination || '—'}</td>
-      <td>${fmtDate(row.hang_datetime)}</td>
+      <td>${hangCellHtml}</td>
       <td>${arrivalCellHtml}</td>
       <td>${removalCellHtml}</td>
       <td style="color:${noteColor}">${row.note || '—'}</td>
@@ -1737,21 +1759,37 @@ function toggleReportRowEdit(rowKey) {
   loadBoardMovementReport();
 }
 
-async function saveReportRowEdit(tripId, fromStopId, toStopId) {
+async function saveReportRowEdit(tripId, fromStopId, toStopId, isFirstLeg) {
   const zpu = document.getElementById('rep-zpu-' + toStopId).value.trim();
   const arrival = document.getElementById('rep-arrival-' + toStopId).value;
   const removal = document.getElementById('rep-removal-' + toStopId).value;
+  const hang = document.getElementById('rep-hang-' + toStopId).value;
 
-  const results = await Promise.all([
+  const requests = [
     fetch(`/trips/${tripId}/stops/${fromStopId}/update`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({zpu_number: zpu || null}),
     }),
     fetch(`/trips/${tripId}/stops/${toStopId}/update`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({arrived_at: arrival || null, completed_at: removal || null}),
+      body: JSON.stringify({arrived_at: fromAlmatyLocalInput(arrival), completed_at: fromAlmatyLocalInput(removal)}),
     }),
-  ]);
+  ];
+  // Навешено первого плеча хранится на самом рейсе (trips.hang_datetime),
+  // у остальных плечей - это locked_at на точке отправления
+  if (isFirstLeg) {
+    requests.push(fetch(`/trips/${tripId}/update-hang`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({hang_datetime: fromAlmatyLocalInput(hang)}),
+    }));
+  } else {
+    requests.push(fetch(`/trips/${tripId}/stops/${fromStopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({locked_at: fromAlmatyLocalInput(hang)}),
+    }));
+  }
+
+  const results = await Promise.all(requests);
   if (results.every(r => r.status === 200)) {
     editingReportRows.delete(toStopId);
     loadBoardMovementReport();
@@ -2185,6 +2223,26 @@ def db_set_stop_zpu(trip_id, stop_id, zpu_number):
         conn.close()
 
 
+def db_update_trip_hang(trip_id, hang_datetime):
+    """Редактирование времени навешивания самого рейса (первое плечо -
+    оно хранится на trips.hang_datetime, а не на конкретной точке)."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE trips SET hang_datetime = %s, updated_at = now() WHERE id = %s RETURNING id",
+            (hang_datetime, trip_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def db_update_stop(trip_id, stop_id, fields):
     """Универсальное редактирование точки маршрута - любое из полей:
     location, zpu_number, status, completed_at, arrived_at.
@@ -2192,7 +2250,7 @@ def db_update_stop(trip_id, stop_id, fields):
     Если статус ставится в 'перенос' или 'отменен' - рейс целиком
     переводится в закрытые (эти решения логистов означают, что
     активно отслеживать этот рейс дальше не нужно)."""
-    allowed = {"location", "zpu_number", "status", "completed_at", "arrived_at"}
+    allowed = {"location", "zpu_number", "status", "completed_at", "arrived_at", "locked_at"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False
@@ -4297,7 +4355,7 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
                 "origin": a["location"], "destination": b["location"],
                 "hang_datetime": hang_time, "arrival_datetime": b["arrived_at"],
                 "removal_datetime": b["completed_at"], "note": note,
-                "from_stop_id": a["stop_id"], "to_stop_id": b["stop_id"],
+                "from_stop_id": a["stop_id"], "to_stop_id": b["stop_id"], "is_first_leg": i == 0,
             })
             num += 1
 
@@ -5509,6 +5567,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_set_stop_zpu(int(m.group(1)), int(m.group(2)))
             return
 
+        m = TRIP_UPDATE_HANG_RE.match(path)
+        if m:
+            self._handle_update_trip_hang(int(m.group(1)))
+            return
+
         m = TRIP_STOP_UPDATE_RE.match(path)
         if m:
             self._handle_update_stop(int(m.group(1)), int(m.group(2)))
@@ -5807,6 +5870,37 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json({"stop_id": stop_id, "zpu_number": zpu_number, "status": "updated"})
 
+    def _handle_update_trip_hang(self, trip_id):
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json({"error": "Тело запроса должно быть JSON"}, status=400)
+            return
+
+        raw = body.get("hang_datetime")
+        if not raw:
+            self._send_json({"error": "Укажите hang_datetime"}, status=400)
+            return
+        try:
+            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+        except ValueError:
+            self._send_json({"error": "Неверный формат даты"}, status=400)
+            return
+
+        try:
+            ok = db_update_trip_hang(trip_id, dt)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
+            return
+
+        if not ok:
+            self._send_json({"error": "Рейс не найден"}, status=404)
+            return
+
+        self._send_json({"trip_id": trip_id, "status": "updated"})
+
     def _handle_update_stop(self, trip_id, stop_id):
         try:
             body = self._read_json_body()
@@ -5826,7 +5920,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"status должен быть одним из: {', '.join(valid_statuses)}"}, status=400)
                 return
             fields["status"] = status_val
-        for dt_field in ("completed_at", "arrived_at"):
+        for dt_field in ("completed_at", "arrived_at", "locked_at"):
             if dt_field in body:
                 raw = body.get(dt_field)
                 if not raw:
