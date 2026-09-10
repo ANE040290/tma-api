@@ -335,7 +335,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .panel { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -16px; padding: 0 16px; }
   .table-scroll table { min-width: 600px; }
-  #tab-trips .table-scroll table { min-width: 0; width: 100%; table-layout: fixed; }
+  #tab-trips .table-scroll table { min-width: 900px; width: 100%; }
   #report-billing-view table, #report-movement-view table { min-width: 0; width: 100%; }
   #report-billing-view td, #report-movement-view td,
   #report-billing-view th, #report-movement-view th { padding: 6px 6px; font-size: 12px; }
