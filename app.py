@@ -288,12 +288,16 @@ async function loadReport() {
   }
   data.rows.forEach(row => {
     const tr = document.createElement('tr');
+    const noteColor = row.note === 'Позднее прибытие' ? '#991b1b'
+      : row.note === 'Не разгружен!' ? '#b45309'
+      : row.note === 'Ок' ? '#166534'
+      : '#888';
     tr.innerHTML = `
       <td>${row.num}</td><td>${row.board_number || '—'}</td><td>${row.warehouse || '—'}</td>
       <td>${row.ezpu_serial || '—'}</td><td>${row.zpu_number || '—'}</td>
       <td>${row.origin || '—'}</td><td>${row.destination || '—'}</td>
       <td>${fmtDate(row.hang_datetime)}</td><td>${fmtDate(row.arrival_datetime)}</td>
-      <td>${fmtDate(row.removal_datetime)}</td><td>${row.note || '—'}</td>
+      <td>${fmtDate(row.removal_datetime)}</td><td style="color:${noteColor}">${row.note || '—'}</td>
     `;
     body.appendChild(tr);
   });
@@ -1712,7 +1716,10 @@ async function loadBoardMovementReport() {
     return;
   }
   data.rows.forEach(row => {
-    const noteColor = row.note === 'позднее прибытие' ? '#991b1b' : (row.note === 'ок' ? '#166534' : '#888');
+    const noteColor = row.note === 'Позднее прибытие' ? '#991b1b'
+      : row.note === 'Не разгружен!' ? '#b45309'
+      : row.note === 'Ок' ? '#166534'
+      : '#888';
     const tr = document.createElement('tr');
     const rowKey = row.to_stop_id;
     const isEditing = rowKey && editingReportRows.has(rowKey);
@@ -4271,6 +4278,35 @@ def build_board_movement_xlsx(report):
     return buf.getvalue()
 
 
+_ALMATY_TZ = datetime.timezone(datetime.timedelta(hours=5))
+
+# Склады с особым временем разгрузки (до 13:00, не до 15:00, как везде)
+_EARLY_CUTOFF_LOCATIONS = {"Кокшетау", "Астана"}
+# Финальный пункт (Алматы/Геологов) - временных рамок нет вообще
+_NO_CUTOFF_LOCATIONS = {"Алматы"}
+
+
+def _compute_movement_note(destination_location, arrived_at, completed_at):
+    """Примечание для отчёта 'Движение бортов' по правилам:
+    - Алматы (Геологов) - финал, без временных рамок вообще
+    - Кокшетау/Астана - разгрузка до 13:00
+    - остальные склады - разгрузка до 15:00
+    Прибыл до срока и уже разгружен -> 'Ок'
+    Прибыл до срока, но ещё НЕ разгружен -> 'Не разгружен!'
+    Прибыл после срока -> 'Позднее прибытие'"""
+    if destination_location in _NO_CUTOFF_LOCATIONS:
+        return ""
+    if not arrived_at:
+        return ""
+
+    cutoff_hour = 13 if destination_location in _EARLY_CUTOFF_LOCATIONS else 15
+    arrived_almaty = arrived_at.astimezone(_ALMATY_TZ) if arrived_at.tzinfo else arrived_at.replace(tzinfo=_ALMATY_TZ)
+
+    if arrived_almaty.hour < cutoff_hour:
+        return "Ок" if completed_at else "Не разгружен!"
+    return "Позднее прибытие"
+
+
 def db_get_board_movement_report(contractor_name, year=None, month=None, arrival_cutoff_hour=15,
                                   date_from=None, date_to=None):
     """Отчёт 'Движение бортов': по каждому плечу маршрута показывает
@@ -4346,10 +4382,8 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
             else:
                 hang_time = None
 
-            note = ""
-            if b["arrived_at"]:
-                note = "ок" if b["arrived_at"].hour < arrival_cutoff_hour else "позднее прибытие"
-            elif b["status"] in ("перенос", "отменен"):
+            note = _compute_movement_note(b["location"], b["arrived_at"], b["completed_at"])
+            if not note and b["status"] in ("перенос", "отменен"):
                 note = b["status"]
 
             rows.append({
