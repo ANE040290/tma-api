@@ -746,7 +746,7 @@ function fromAlmatyLocalInput(val) {
   return val + ':00+05:00';
 }
 
-
+async function loadDevices() {
   const search = document.getElementById('f-search').value.trim();
   const status = document.getElementById('f-status').value.trim();
   const type = document.getElementById('f-type').value;
