@@ -4287,7 +4287,10 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         cur = conn.cursor()
         if date_from and date_to:
             period_from = date_from
-            period_to = date_to
+            # date_to должен включать ВЕСЬ выбранный день (а не быть
+            # исключающей границей ровно на полночь этой даты) -
+            # прибавляем день, раз сравнение ниже идёт как "< period_to"
+            period_to = date_to + datetime.timedelta(days=1)
         else:
             period_from = datetime.date(year, month, 1)
             period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
@@ -4376,7 +4379,7 @@ def db_get_ezpu_billing_report(contractor_name, year=None, month=None, rate=DEFA
         cur = conn.cursor()
         if date_from and date_to:
             period_from = date_from
-            period_to = date_to
+            period_to = date_to + datetime.timedelta(days=1)
         else:
             period_from = datetime.date(year, month, 1)
             period_to = datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)
