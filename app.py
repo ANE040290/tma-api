@@ -1052,7 +1052,9 @@ async function loadTrips() {
       // не стартовало).
       const legHangTime = i === 0
         ? t.hang_datetime
-        : (leg.fromStop && legZpuValue ? (leg.fromStop.locked_at || leg.fromStop.completed_at || leg.fromStop.arrived_at) : null);
+        : (leg.fromStop
+            ? (leg.fromStop.locked_at || (legZpuValue ? (leg.fromStop.completed_at || leg.fromStop.arrived_at) : null))
+            : null);
 
       const toCellHtml = editingStop
         ? `<input id="edit-loc-${leg.toStop.id}" value="${(leg.to || '').replace(/"/g, '&quot;')}" style="width:100px" onclick="event.stopPropagation()">`
@@ -4370,15 +4372,18 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
                 continue
             # Время навешивания этого плеча: сначала locked_at - это
             # НАСТОЯЩЕЕ время постановки пломбы от BigLock (LockTime),
-            # если его ещё нет в данных (старые записи до этого
-            # исправления) - приближение через completed_at/arrived_at
-            # предыдущей точки. Но только если плечо реально уже
-            # началось (есть ЗПУ) - иначе показывать нечего, а брать
-            # заглушку из предыдущего плеча вводит в заблуждение.
+            # если его ещё нет в данных - приближение через
+            # completed_at/arrived_at предыдущей точки, но только если
+            # плечо реально уже началось (есть ЗПУ) - иначе заглушка из
+            # предыдущего плеча вводит в заблуждение. locked_at (в том
+            # числе вписанное вручную, например когда BigLock недоступен)
+            # показываем ВСЕГДА, независимо от ЗПУ.
             if i == 0:
                 hang_time = a["locked_at"] or a["completed_at"] or a["arrived_at"] or info["hang_dt"]
+            elif a["locked_at"]:
+                hang_time = a["locked_at"]
             elif a["zpu"]:
-                hang_time = a["locked_at"] or a["completed_at"] or a["arrived_at"]
+                hang_time = a["completed_at"] or a["arrived_at"]
             else:
                 hang_time = None
 
