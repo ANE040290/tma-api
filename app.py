@@ -4364,9 +4364,9 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
         stops = sorted(info["stops"], key=lambda s: s["seq"])
         for i in range(len(stops) - 1):
             a, b = stops[i], stops[i + 1]
-            if b["status"] == "ошибочно_закрыт":
-                # ложное срабатывание (напр. по ошибке сняли не ту пломбу) -
-                # реального заезда на базу не было, в отчёт не включаем
+            if b["status"] in ("ошибочно_закрыт", "перенос", "отменен"):
+                # ложное срабатывание, либо плечо перенесено/отменено -
+                # в отчёт по перемещению бортов не включаем
                 continue
             # Время навешивания этого плеча: сначала locked_at - это
             # НАСТОЯЩЕЕ время постановки пломбы от BigLock (LockTime),
@@ -4383,8 +4383,6 @@ def db_get_board_movement_report(contractor_name, year=None, month=None, arrival
                 hang_time = None
 
             note = _compute_movement_note(b["location"], b["arrived_at"], b["completed_at"])
-            if not note and b["status"] in ("перенос", "отменен"):
-                note = b["status"]
 
             rows.append({
                 "num": num, "trip_id": trip_id, "board_number": info["board"],
