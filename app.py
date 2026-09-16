@@ -349,6 +349,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   input, select, button { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
   td.actions-cell { white-space: normal; min-width: 160px; }
   td.actions-cell button { font-size: 12px; padding: 5px 8px; margin: 2px 3px 2px 0; }
+  td.actions-cell.actions-col { min-width: 110px; }
+  td.actions-cell.actions-col button { display: block; width: 100%; font-size: 11px; padding: 4px 6px; margin: 2px 0; }
   button { background: #1f2937; color: #fff; border: none; cursor: pointer; }
   button:hover { background: #374151; }
   button.secondary { background: #e5e7eb; color: #222; }
@@ -998,7 +1000,7 @@ async function loadTrips() {
         Снято:<br>${t.removal_datetime ? fmtDate(t.removal_datetime) : '—'}
       </td>
       <td><span class="trip-status ${statusClass(t.status)}">${t.status}</span></td>
-      <td class="actions-cell">${mainActions.join('')}</td>
+      <td class="actions-cell actions-col">${mainActions.join('')}</td>
     `;
     body.appendChild(mainRow);
 
@@ -1037,7 +1039,7 @@ async function loadTrips() {
         legActions.push(`<button class="secondary" style="color:#991b1b" title="Удалить точку" onclick="event.stopPropagation(); deleteStop(${t.id}, ${leg.toStop.id}, '${(leg.to || '').replace(/'/g, "\\'")}')">🗑️</button>`);
       }
       if (editingStop) {
-        legActions.push(`<button onclick="event.stopPropagation(); saveStopEdit(${t.id}, ${leg.toStop.id})">Сохранить</button>`);
+        legActions.push(`<button onclick="event.stopPropagation(); saveStopEdit(${t.id}, ${leg.toStop.id}, ${leg.fromStop ? leg.fromStop.id : 'null'})">Сохранить</button>`);
         legActions.push(`<button class="secondary" onclick="event.stopPropagation(); toggleEditStop(${leg.toStop.id})">Отмена</button>`);
       }
 
@@ -1072,13 +1074,21 @@ async function loadTrips() {
            </select>`
         : (leg.toStop ? '<span class="trip-status ' + statusClass(legStatus) + '">' + legStatus + '</span>' : '');
 
+      const legEzpuValue = leg.fromStop ? leg.fromStop.ezpu_serial : null;
+      const ezpuCellHtml = editingStop
+        ? `<input id="edit-leg-ezpu-${leg.toStop.id}" value="${(legEzpuValue || '').replace(/"/g, '&quot;')}" placeholder="ЭЗПУ" style="width:90px" onclick="event.stopPropagation()">`
+        : (legEzpuValue || '—');
+
       tr.innerHTML = `
         <td>${num}</td>
-        <td style="font-size:12px"><span style="color:#888">ЗПУ:</span> <b style="color:${isDuplicateZpu ? '#dc2626' : '#111'}; font-size:14px">${zpuCell(leg, editingZpu, zpuStopId)}${isDuplicateZpu ? ' ⚠️' : ''}</b></td>
+        <td style="font-size:12px">
+          <span style="color:#888">ЭЗПУ:</span> <b style="font-size:13px">${ezpuCellHtml}</b><br>
+          <span style="color:#888">ЗПУ:</span> <b style="color:${isDuplicateZpu ? '#dc2626' : '#111'}; font-size:14px">${zpuCell(leg, editingZpu, zpuStopId)}${isDuplicateZpu ? ' ⚠️' : ''}</b>
+        </td>
         <td>${leg.from} → ${toCellHtml}</td>
         <td style="font-size:12px">${timeCellHtml}</td>
         <td>${statusCellHtml}</td>
-        <td class="actions-cell">${legActions.join('')}</td>
+        <td class="actions-cell actions-col">${legActions.join('')}</td>
       `;
       body.appendChild(tr);
     });
@@ -1095,22 +1105,33 @@ function toggleEditStop(stopId) {
   loadTrips();
 }
 
-async function saveStopEdit(tripId, stopId) {
+async function saveStopEdit(tripId, stopId, fromStopId) {
   const location = document.getElementById('edit-loc-' + stopId).value.trim();
   const timeVal = document.getElementById('edit-time-' + stopId).value;
   const status = document.getElementById('edit-status-' + stopId).value;
+  const ezpuInput = document.getElementById('edit-leg-ezpu-' + stopId);
   const body = {location, status};
   body.completed_at = fromAlmatyLocalInput(timeVal);
-  const r = await fetch(`/trips/${tripId}/stops/${stopId}/update`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  });
-  if (r.status === 200) {
+
+  const requests = [
+    fetch(`/trips/${tripId}/stops/${stopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    }),
+  ];
+  if (ezpuInput && fromStopId) {
+    requests.push(fetch(`/trips/${tripId}/stops/${fromStopId}/update`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ezpu_serial: ezpuInput.value.trim() || null}),
+    }));
+  }
+
+  const results = await Promise.all(requests);
+  if (results.every(r => r.status === 200)) {
     editingStops.delete(stopId);
     loadTrips();
   } else {
-    const d = await r.json();
-    alert(d.error || 'Ошибка обновления');
+    alert('Ошибка обновления');
   }
 }
 
@@ -2259,7 +2280,7 @@ def db_update_stop(trip_id, stop_id, fields):
     Если статус ставится в 'перенос' или 'отменен' - рейс целиком
     переводится в закрытые (эти решения логистов означают, что
     активно отслеживать этот рейс дальше не нужно)."""
-    allowed = {"location", "zpu_number", "status", "completed_at", "arrived_at", "locked_at"}
+    allowed = {"location", "zpu_number", "status", "completed_at", "arrived_at", "locked_at", "ezpu_serial"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False
@@ -2375,12 +2396,12 @@ def db_get_trip(trip_id):
         if not r:
             return None
         cur.execute(
-            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number, arrived_at, locked_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, stop_type, sequence, location, status, completed_at, zpu_number, arrived_at, locked_at, ezpu_serial FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
         stops = [
             {"id": s[0], "stop_type": s[1], "sequence": s[2], "location": s[3], "status": s[4],
-             "completed_at": s[5], "zpu_number": s[6], "arrived_at": s[7], "locked_at": s[8]}
+             "completed_at": s[5], "zpu_number": s[6], "arrived_at": s[7], "locked_at": s[8], "ezpu_serial": s[9]}
             for s in cur.fetchall()
         ]
         return {
@@ -2426,18 +2447,18 @@ def db_list_trips(status=None, client=None, limit=200):
         if trip_ids:
             cur.execute(
                 """
-                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at, arrived_at, locked_at FROM trip_stops
+                SELECT id, trip_id, stop_type, sequence, location, status, zpu_number, completed_at, arrived_at, locked_at, ezpu_serial FROM trip_stops
                 WHERE trip_id = ANY(%s) ORDER BY sequence
                 """,
                 (trip_ids,),
             )
-            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at, arrived_at, locked_at in cur.fetchall():
+            for stop_id, trip_id, stop_type, sequence, location, st_status, zpu, completed_at, arrived_at, locked_at, ezpu_serial in cur.fetchall():
                 stops_by_trip.setdefault(trip_id, {"pickups": [], "dropoffs": []})
                 key = "pickups" if stop_type == "погрузка" else "dropoffs"
                 stops_by_trip[trip_id][key].append({
                     "id": stop_id, "location": location, "status": st_status,
                     "sequence": sequence, "zpu_number": zpu, "completed_at": completed_at,
-                    "arrived_at": arrived_at, "locked_at": locked_at,
+                    "arrived_at": arrived_at, "locked_at": locked_at, "ezpu_serial": ezpu_serial,
                 })
 
         return [
@@ -3954,7 +3975,7 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, sequence, stop_type, status, zpu_number, completed_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, sequence, stop_type, status, zpu_number, completed_at, ezpu_serial FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
         stops = cur.fetchall()
@@ -4002,13 +4023,14 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
 
             used_session_ids.add(session.get("Id"))
             zpu = session.get("MechanicalDeviceCaseId")
+            leg_ezpu = session.get("ElectricDeviceCaseId")
             release_time = parse_dt(session.get("ReleaseTime"))
             lock_time = parse_dt(session.get("LockTime"))
 
-            if zpu and from_stop[4] != zpu:
+            if zpu and (from_stop[4] != zpu or from_stop[6] != leg_ezpu):
                 cur.execute(
-                    "UPDATE trip_stops SET zpu_number = %s, locked_at = %s WHERE id = %s",
-                    (zpu, lock_time, from_stop[0]),
+                    "UPDATE trip_stops SET zpu_number = %s, locked_at = %s, ezpu_serial = %s WHERE id = %s",
+                    (zpu, lock_time, leg_ezpu, from_stop[0]),
                 )
                 changes.append(f"leg{i + 1}_zpu={zpu}")
                 if lock_time:
@@ -5989,6 +6011,8 @@ class Handler(BaseHTTPRequestHandler):
             fields["location"] = (body.get("location") or "").strip() or None
         if "zpu_number" in body:
             fields["zpu_number"] = (body.get("zpu_number") or "").strip() or None
+        if "ezpu_serial" in body:
+            fields["ezpu_serial"] = (body.get("ezpu_serial") or "").strip() or None
         if "status" in body:
             status_val = (body.get("status") or "").strip()
             valid_statuses = ("ожидание", "исполнено", "перенос", "отменен", "ошибочно_закрыт")
