@@ -3954,20 +3954,53 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, sequence, stop_type, status, zpu_number FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
+            "SELECT id, sequence, stop_type, status, zpu_number, completed_at FROM trip_stops WHERE trip_id = %s ORDER BY sequence",
             (trip_id,),
         )
         stops = cur.fetchall()
         legs = [(stops[i], stops[i + 1]) for i in range(len(stops) - 1)]
 
+        # Сопоставляем плечи с сессиями BigLock ПО ВРЕМЕНИ, а не по
+        # порядковому номеру - раньше было leg[i] <-> items_sorted[i],
+        # но это ломается, если ЭЗПУ заменили в середине рейса (кнопка
+        # "Изменить устройство"): у НОВОГО устройства своя история
+        # начинается заново с нуля, и порядковые номера перестают
+        # совпадать с реальным номером плеча в рейсе. Вместо этого для
+        # каждого ещё не закрытого плеча ищем самую раннюю ещё не
+        # использованную сессию, чья LockTime позже времени закрытия
+        # предыдущей точки.
+        last_known_time = None
+        for from_stop, to_stop in legs:
+            if to_stop[3] == "исполнено" and to_stop[5]:
+                last_known_time = to_stop[5]
+
+        used_session_ids = set()
+
         changes = []
         for i, (from_stop, to_stop) in enumerate(legs):
             if to_stop[3] == "исполнено":
                 continue  # плечо уже закрыто - не трогаем
-            if i >= len(items_sorted):
+
+            # ищем самую раннюю ещё не использованную сессию, чья
+            # LockTime позже времени закрытия предыдущей точки (или
+            # любую, если это самое первое незакрытое плечо)
+            session = None
+            for candidate in items_sorted:
+                cand_id = candidate.get("Id")
+                if cand_id in used_session_ids:
+                    continue
+                lock_time_raw = candidate.get("LockTime")
+                if last_known_time and lock_time_raw:
+                    cand_lock_dt = parse_dt(lock_time_raw)
+                    if cand_lock_dt and cand_lock_dt <= last_known_time:
+                        continue
+                session = candidate
+                break
+
+            if session is None:
                 break  # для этого плеча пока нет данных в BigLock
 
-            session = items_sorted[i]
+            used_session_ids.add(session.get("Id"))
             zpu = session.get("MechanicalDeviceCaseId")
             release_time = parse_dt(session.get("ReleaseTime"))
             lock_time = parse_dt(session.get("LockTime"))
@@ -3987,6 +4020,7 @@ def biglock_reconcile_trip(trip_id, board_number, ezpu_serial=None, hang_datetim
                     (release_time, to_stop[0]),
                 )
                 changes.append(f"leg{i + 1}_closed_at={release_time.isoformat()}")
+                last_known_time = release_time
 
         conn.commit()
 
